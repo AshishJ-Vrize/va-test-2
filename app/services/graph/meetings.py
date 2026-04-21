@@ -1,5 +1,5 @@
-# Scope A — MeetingsMixin: get_me, get_user_by_id, list_online_meetings,
-#            get_online_meeting, get_meeting_by_join_url
+# Scope A — MeetingsMixin: get_me, get_user_by_id, get_online_meeting,
+#            get_meeting_by_join_url
 # Owner: Graph + Routes team
 # Reference: CONTEXT.md Section 13 (meetings.py exports)
 #
@@ -8,6 +8,17 @@
 # This file does NOT import from client.py — methods use self.get() and
 # self._base_path() which are guaranteed to exist on GraphClient instances.
 # Exceptions are imported from exceptions.py to avoid circular imports.
+#
+# Verified ingestion flow (MVP + live testing 2026-04-21):
+#   callChainId → joinWebUrl
+#     → get_meeting_by_join_url()  → meetingId + participants (displayName=null)
+#     → get_user_by_id(email/oid)  → real displayName per participant
+#     → get_transcripts(meetingId) → transcriptId
+#     → get_transcript_content()   → VTT string
+#
+# list_online_meetings was REMOVED — GET /me/onlineMeetings requires $filter,
+# it is not a list-all endpoint. Verified live 2026-04-21 (Graph returns 400
+# with graph_code=InvalidArgument without a filter).
 
 import logging
 
@@ -56,9 +67,9 @@ class MeetingsMixin:
         Fetches a user profile by their Graph object ID or UPN (email).
         The UPN works as a lookup key — Graph accepts both.
 
-        Use this to resolve display names for meeting participants.
-        displayName in Graph meeting participant responses is always null —
-        this is the correct method to get the real display name.
+        Used to resolve display names for meeting participants.
+        Graph always returns displayName=null in meeting participant responses —
+        this method is the correct way to get the real display name.
         Reference: CONTEXT.md Section 13 (Graph API participant response shape).
 
         Args:
@@ -96,46 +107,6 @@ class MeetingsMixin:
             raise
 
     # ── Meeting methods ───────────────────────────────────────────────────────
-
-    def list_online_meetings(
-        self,
-        top: int = 20,
-        user_id: str | None = None,
-    ) -> list[dict]:
-        """
-        GET /me/onlineMeetings?$top={top}           (delegated token)
-        GET /users/{user_id}/onlineMeetings?$top={}  (app token)
-
-        Returns a list of online meeting objects for the user.
-        Each dict is the raw Graph meeting object — no transformation applied.
-        Parsing and mapping to DB models is done by the ingestion pipeline.
-
-        Args:
-            top:     Maximum number of meetings to return. Default 20.
-            user_id: Graph user ID. Pass when using an app-only token.
-                     Leave None when using a delegated (user) token.
-
-        Returns:
-            List of meeting dicts. Empty list if no meetings found — not an error.
-
-        Raises:
-            TokenExpiredError:  Token expired.
-            GraphClientError:   Graph returned a non-2xx response.
-        """
-        base = self._base_path(user_id)
-        logger.debug(
-            "list_online_meetings: fetching | top=%s | user_id=%s | path=%s",
-            top, user_id, base,
-        )
-
-        result = self.get(base, params={"$top": top})
-        meetings = result.get("value", [])
-
-        logger.info(
-            "list_online_meetings: success | count=%d | user_id=%s",
-            len(meetings), user_id,
-        )
-        return meetings
 
     def get_online_meeting(
         self,
@@ -184,11 +155,14 @@ class MeetingsMixin:
         GET /me/onlineMeetings?$filter=joinWebUrl eq '{join_url}'
         GET /users/{user_id}/onlineMeetings?$filter=joinWebUrl eq '{join_url}'
 
-        Looks up a meeting by its join URL using an OData filter.
+        Looks up a meeting by its join URL using an OData $filter.
         Returns the first match (join URLs are unique per meeting).
 
-        Used when a webhook or ingest request provides a join URL instead of
-        a meeting ID — the join URL is used as the dedup key in the tenant DB.
+        This is the entry point of the ingestion flow:
+          webhook callChainId → joinWebUrl → this method → meetingId → transcripts
+
+        ⚠ $filter IS required on this endpoint — it does not support listing
+          all meetings without a filter. Verified live 2026-04-21.
 
         Args:
             join_url: The full Teams join URL (meetings.join_url in tenant DB).
@@ -200,7 +174,7 @@ class MeetingsMixin:
         Raises:
             MeetingNotFoundError: Graph responded successfully but no meeting
                                   matched the join URL. The URL may be stale
-                                  or belong to a different tenant.
+                                  or belong to a different user.
             TokenExpiredError:    Token expired.
             GraphClientError:     Graph returned a non-2xx response.
         """
@@ -216,7 +190,7 @@ class MeetingsMixin:
 
         if not meetings:
             logger.warning(
-                "get_meeting_by_join_url: no meeting found for join_url | "
+                "get_meeting_by_join_url: no meeting found | "
                 "user_id=%s | join_url=%s", user_id, join_url,
             )
             raise MeetingNotFoundError(

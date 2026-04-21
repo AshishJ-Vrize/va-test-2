@@ -44,3 +44,4 @@ Thumbs.db
 # Local scripts used for token testing
 get_token.py
 msal.py
+test_graph.py
