@@ -88,7 +88,7 @@ va-platform/
 │   │   ├── graph/
 │   │   │   ├── __init__.py
 │   │   │   ├── client.py              # GraphClient, TokenExpiredError,
-│   │   │   │                          # get_access_token_app()
+│   │   │   │                          # get_access_token_app(ms_tenant_id)
 │   │   │   ├── meetings.py            # Graph meeting methods
 │   │   │   ├── transcripts.py         # Graph transcript methods
 │   │   │   └── webhook.py             # Webhook registration — NOT in this scope
@@ -374,7 +374,7 @@ No exceptions. Even admins go through this gate for the chat endpoint.
 
 ### App auth (backend → Microsoft Graph, for webhooks only)
 - **Flow:** Client credentials (app-only)
-- **Function:** `get_access_token_app()` in `app/services/graph/client.py`
+- **Function:** `get_access_token_app(ms_tenant_id: str)` in `app/services/graph/client.py`
 - **Scope requested:** `https://graph.microsoft.com/.default`
 - **Used for:** Webhook registration and callRecords processing only
 
@@ -640,13 +640,18 @@ class GraphClient:
     # /me/onlineMeetings       when user_id is None  (delegated token)
     # /users/{id}/onlineMeetings  when user_id given (app token)
 
-def get_access_token_app() -> str:
+def get_access_token_app(ms_tenant_id: str) -> str:
     """
-    Client credentials flow. Returns access token for app-level Graph calls.
-    Uses: settings.AZURE_CLIENT_ID, settings.AZURE_CLIENT_SECRET,
-          settings.AZURE_TENANT_ID
+    Client credentials flow. Returns access token scoped to the given tenant.
+    Authority: https://login.microsoftonline.com/{ms_tenant_id}
+    Uses: settings.AZURE_CLIENT_ID, settings.AZURE_CLIENT_SECRET
     Scope: https://graph.microsoft.com/.default
     Used by: webhook service only.
+
+    ms_tenant_id is the CUSTOMER's Azure tenant ID (tenants.ms_tenant_id),
+    NOT settings.AZURE_TENANT_ID (which is the platform's own tenant).
+    Same client_id + client_secret, different authority per customer tenant.
+    Admin consent for CallRecords.Read.All must be granted in each customer tenant.
     """
 ```
 
@@ -824,7 +829,89 @@ endpoint without verifying the URI and response shape first.
 
 ---
 
-## 17. Open Questions — Do Not Implement Until Resolved
+## 17. Graph API — Error Handling and Retry Policy
+
+**Implemented in:** `app/services/graph/client.py` → `GraphClient._request()`  
+**Exceptions defined in:** `app/services/graph/exceptions.py`
+
+### Retry targets (automatic, up to 3 attempts)
+
+| Failure | Strategy | Notes |
+|---------|----------|-------|
+| Network error / timeout | Exponential backoff + jitter: ~1s, ~2s, ~4s | Jitter prevents thundering herd across tenants |
+| 429 Too Many Requests | Wait `Retry-After` header value; fall back to backoff if header absent | Graph always includes this header |
+| 5xx Server Error | Exponential backoff + jitter: ~1s, ~2s, ~4s | Graph outage — retries buy time for recovery |
+
+**After 3 retries exhausted:**
+- Route handlers → return HTTP 503 to frontend ("Graph temporarily unavailable")
+- Celery tasks → Celery reschedules with long delay (5–60 min). Celery owns extended outage resilience, not `_request()`.
+
+### No-retry targets (fail immediately)
+
+| Status | Action | Reason |
+|--------|--------|--------|
+| 401 Unauthorized | Raise `TokenExpiredError` | Delegated token expired. Frontend must re-auth via MSAL.js. Backend cannot refresh delegated tokens. |
+| 400 Bad Request | Raise `GraphClientError`, log method + URL + params + body + `graph_code` + `graph_message` | This is a code bug. Full request logged for debugging. Never retry — same bad request will fail again. |
+| 403 Forbidden | Raise `GraphClientError` with `graph_code` + `likely_cause` | Permission or consent issue — requires human/admin action. |
+| 404 Not Found | Raise `GraphClientError` with `graph_code` + `likely_cause` | Resource does not exist. Common causes logged per endpoint (see below). |
+
+### 401 token handling — delegated vs app-only
+
+| Token type | 401 behaviour |
+|------------|--------------|
+| Delegated (user, from MSAL.js frontend) | Raise `TokenExpiredError` → route handler returns 401 → MSAL.js refreshes token → frontend retries |
+| App-only (from `get_access_token_app`) | MSAL backend cache handles refresh. If Graph still returns 401, it is almost certainly a missing admin consent issue, not token expiry. |
+
+### 403 likely_cause hints (internal logs only, not shown to users)
+
+| graph_code | Endpoint | Logged cause |
+|-----------|----------|-------------|
+| `Authorization_RequestDenied` | `.../transcripts/...` | Missing `OnlineMeetingTranscript.Read.All` permission, or transcription policy not enabled in M365 tenant |
+| `Authorization_RequestDenied` | `.../recordings/...` | Missing `OnlineMeetingRecording.Read.All` permission |
+| `Authorization_RequestDenied` | `.../onlineMeetings/...` | Missing `OnlineMeetings.Read` permission |
+| `AccessDenied` / `Forbidden` | Any | Admin consent not granted in customer tenant |
+
+### 404 likely_cause hints (internal logs only, not shown to users)
+
+| Endpoint pattern | Logged cause |
+|-----------------|-------------|
+| `.../transcripts/{id}/content` | Transcript content not yet processed — retry in 5–10 min |
+| `.../transcripts/` | Transcription not enabled, or transcript ID incorrect |
+| `.../recordings/` | Meeting not recorded, or recording was deleted |
+| `.../onlineMeetings/` | Meeting deleted, ID incorrect, or organiser account removed |
+| `/users/` | User account deleted or ID/UPN incorrect |
+
+### Verified transcript response shape (live call 2026-03-25)
+
+```json
+{
+  "value": [
+    {
+      "id": "<transcript-id>",
+      "meetingId": "...",
+      "callId": "...",
+      "contentCorrelationId": "...",
+      "transcriptContentUrl": "...",
+      "createdDateTime": "2026-03-25T10:31:24Z",
+      "endDateTime": "2026-03-25T11:16:12Z",
+      "meetingOrganizer": {
+        "user": {
+          "id": "<user-id>",
+          "displayName": null,
+          "tenantId": "..."
+        }
+      }
+    }
+  ]
+}
+```
+
+`displayName` on `meetingOrganizer.user` is **always null** — same as meeting participants.  
+Transcript content format: `text/vtt` (raw string). Parsing is `services/ingestion/vtt_parser.py`.
+
+---
+
+## 18. Open Questions — Do Not Implement Until Resolved
 
 These decisions have NOT been finalized. Do not write code that depends on them.
 
