@@ -655,6 +655,16 @@ def get_access_token_app(ms_tenant_id: str) -> str:
     """
 ```
 
+### Verified ingestion flow (MVP + live testing 2026-04-21)
+
+```
+callChainId → joinWebUrl  (webhook team resolves this)
+  → get_meeting_by_join_url(joinWebUrl)  → meetingId + participants (displayName=null)
+  → get_user_by_id(email/oid)            → real displayName per participant
+  → get_transcripts(meetingId)           → transcriptId
+  → get_transcript_content(meetingId, transcriptId) → raw VTT string
+```
+
 ### `meetings.py` — exports
 
 ```python
@@ -667,22 +677,24 @@ GraphClient.get_me(self) -> dict:
 
 GraphClient.get_user_by_id(self, user_graph_id: str) -> dict | None:
     # GET /users/{user_graph_id}
-    # Returns full user profile or None on failure
+    # Returns full user profile or None on 404
     # Passing UPN (email) as user_graph_id works as lookup key
     # displayName in meeting participant responses is ALWAYS null —
-    # call this to get the real display name
-
-GraphClient.list_online_meetings(self, top: int = 20, user_id: str = None) -> list[dict]:
-    # GET /me/onlineMeetings?$top={top}           (delegated)
-    # GET /users/{user_id}/onlineMeetings?$top={}  (app token)
+    # call this to get the real display name for each participant
 
 GraphClient.get_online_meeting(self, meeting_id: str, user_id: str = None) -> dict:
-    # GET /me/onlineMeetings/{meeting_id}
-    # GET /users/{user_id}/onlineMeetings/{meeting_id}
+    # GET /me/onlineMeetings/{meeting_id}           (delegated)
+    # GET /users/{user_id}/onlineMeetings/{meeting_id}  (app token)
 
 GraphClient.get_meeting_by_join_url(self, join_url: str, user_id: str = None) -> dict:
     # GET /me/onlineMeetings?$filter=joinWebUrl eq '{join_url}'
-    # Returns first result or raises Exception if none found
+    # ⚠ $filter is REQUIRED — this endpoint does not support listing all meetings.
+    # Verified live 2026-04-21: calling without $filter returns 400 InvalidArgument.
+    # Returns first result or raises MeetingNotFoundError if none found.
+
+# list_online_meetings REMOVED — GET /me/onlineMeetings is not a list endpoint.
+# It requires $filter. Verified live 2026-04-21 (400 InvalidArgument without filter).
+# Meetings are discovered via webhook callChainId → joinWebUrl, not by listing.
 ```
 
 ### `transcripts.py` — exports
