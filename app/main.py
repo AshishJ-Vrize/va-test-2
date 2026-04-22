@@ -114,5 +114,8 @@ app = FastAPI(
 # Pattern: from app.api.routes.X import router as X_router
 #          app.include_router(X_router, prefix="/X", tags=["X"])
 
-from app.api.routes.webhook import router as webhook_router  # noqa: E402
+from app.api.middleware.tenant import RequestTracingMiddleware  # noqa: E402
+from app.api.routes.webhook import router as webhook_router    # noqa: E402
+
+app.add_middleware(RequestTracingMiddleware)
 app.include_router(webhook_router, prefix="/webhook", tags=["webhook"])
