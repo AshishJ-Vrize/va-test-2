@@ -5,15 +5,17 @@ import os
 from collections.abc import Generator
 from dataclasses import dataclass
 from threading import Lock
+from typing import TYPE_CHECKING
 
 from psycopg2 import OperationalError
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.config.settings import settings
-from app.core.keyvault import key_vault_client
 from app.db.registry import CachedTenant
 from app.db.tenant.session import make_tenant_engine, make_tenant_session_factory
+
+if TYPE_CHECKING:
+    from app.core.keyvault import KeyVaultClient
 
 log = logging.getLogger(__name__)
 
@@ -44,7 +46,8 @@ class DatabaseManager:
     cache miss and both creating a pool for the same tenant.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, kv_client: KeyVaultClient) -> None:
+        self._kv = kv_client
         self._pool_cache: dict[str, _PoolEntry] = {}
         self._lock = Lock()
 
@@ -110,7 +113,7 @@ class DatabaseManager:
             return entry
 
     def _build_url(self, cached_tenant: CachedTenant) -> str:
-        secret = key_vault_client.get_db_secret(cached_tenant.org_name)
+        secret = self._kv.get_db_secret(cached_tenant.org_name)
         db_user = os.environ["TENANT_DB_USER"]
         db_host = cached_tenant.db_host
         db_name = _db_name(cached_tenant.org_name)
@@ -119,5 +122,5 @@ class DatabaseManager:
             f"@{db_host}/{db_name}?sslmode=require"
         )
 
-
-db_manager = DatabaseManager()
+# No module-level singleton — use app.core.state.get_db_manager()
+# FastAPI deps read from app.state (set by lifespan). Celery uses state.py directly.

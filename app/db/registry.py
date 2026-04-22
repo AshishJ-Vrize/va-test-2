@@ -100,4 +100,5 @@ class TenantRegistry:
         return self.get(ms_tenant_id)
 
 
-tenant_registry = TenantRegistry()
+# No module-level singleton here — use app.core.state.get_tenant_registry()
+# FastAPI deps read from app.state (set by lifespan). Celery uses state.py directly.

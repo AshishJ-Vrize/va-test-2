@@ -9,7 +9,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.config.settings import settings
+from app.config.settings import get_settings
 
 log = logging.getLogger(__name__)
 
@@ -17,7 +17,13 @@ _APP_ENV = os.getenv("APP_ENV", "development")
 
 
 def _create_central_engine() -> Engine:
-    if "sslmode=require" not in settings.CENTRAL_DB_URL:
+    """
+    Builds the SQLAlchemy engine for the central DB.
+    Called by lifespan (main.py) on startup and by state.py for lazy Celery init.
+    Not called at import time — no module-level side effects.
+    """
+    central_db_url = get_settings().CENTRAL_DB_URL
+    if "sslmode=require" not in central_db_url:
         if _APP_ENV == "production":
             raise ValueError(
                 "CENTRAL_DB_URL must include sslmode=require in production. "
@@ -29,7 +35,7 @@ def _create_central_engine() -> Engine:
         )
 
     return create_engine(
-        settings.CENTRAL_DB_URL,
+        central_db_url,
         pool_size=5,
         max_overflow=10,
         pool_recycle=1800,
@@ -38,19 +44,13 @@ def _create_central_engine() -> Engine:
     )
 
 
-engine: Engine = _create_central_engine()
-
-_session_factory: sessionmaker[Session] = sessionmaker(
-    bind=engine,
-    autoflush=False,
-    autocommit=False,
-    expire_on_commit=False,
-)
-
-
-def get_central_db() -> Generator[Session, None, None]:
-    """FastAPI dependency — yields a session, rolls back on error, always closes."""
-    session = _session_factory()
+def get_central_db(request) -> Generator[Session, None, None]:
+    """
+    FastAPI dependency — yields a central DB session.
+    Reads the session factory from app.state (set by lifespan in main.py).
+    FastAPI injects `request` automatically — callers use Depends(get_central_db).
+    """
+    session: Session = request.app.state.central_session_factory()
     try:
         yield session
         session.commit()
@@ -63,8 +63,12 @@ def get_central_db() -> Generator[Session, None, None]:
 
 @contextmanager
 def central_session() -> Generator[Session, None, None]:
-    """Context manager for scripts and Celery tasks that don't use FastAPI Depends."""
-    session = _session_factory()
+    """
+    Context manager for Celery tasks and scripts (no FastAPI Request available).
+    Uses state.py lazy getter so it works whether or not lifespan has run.
+    """
+    from app.core import state
+    session: Session = state.get_central_session_factory()()
     try:
         yield session
         session.commit()
@@ -78,7 +82,8 @@ def central_session() -> Generator[Session, None, None]:
 def check_central_db_health() -> bool:
     """Used by /health route. Returns True if the DB is reachable."""
     try:
-        with engine.connect() as conn:
+        from app.core import state
+        with state.get_central_engine().connect() as conn:
             conn.execute(text("SELECT 1"))
         return True
     except Exception:
