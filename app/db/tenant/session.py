@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-from sqlalchemy import create_engine
-from sqlalchemy.engine import Engine
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
+from sqlalchemy.orm import sessionmaker
 
 
-def make_tenant_engine(url: str) -> Engine:
+def make_tenant_engine(url: str) -> AsyncEngine:
     """
-    Validates that the URL enforces SSL then creates a per-tenant engine.
-    pool_size=2, max_overflow=3: conservative per CONTEXT.md §10 — 500 tenants
-    sharing the same process means we cannot afford large pools per tenant.
+    Creates a per-tenant async SQLAlchemy engine.
+    URL must use the psycopg3 async driver: postgresql+psycopg_async://
+    pool_size=2, max_overflow=3: conservative per CONTEXT.md §10.
     """
     if "sslmode=require" not in url:
         raise ValueError(
@@ -17,7 +16,7 @@ def make_tenant_engine(url: str) -> Engine:
             f"Received URL is missing it: {url!r}"
         )
 
-    return create_engine(
+    return create_async_engine(
         url,
         pool_size=2,
         max_overflow=3,
@@ -27,9 +26,10 @@ def make_tenant_engine(url: str) -> Engine:
     )
 
 
-def make_tenant_session_factory(engine: Engine) -> sessionmaker[Session]:
+def make_tenant_session_factory(engine: AsyncEngine) -> sessionmaker[AsyncSession]:
     return sessionmaker(
         bind=engine,
+        class_=AsyncSession,
         autoflush=False,
         autocommit=False,
         expire_on_commit=False,
