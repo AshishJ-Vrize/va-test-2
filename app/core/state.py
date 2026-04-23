@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import redis.asyncio as redis_lib
-    from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+    from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
     from sqlalchemy.orm import sessionmaker
 
     from app.core.keyvault import KeyVaultClient
@@ -94,12 +94,10 @@ def get_central_session_factory() -> sessionmaker[AsyncSession]:
     if _central_session_factory is None:
         with _lock:
             if _central_session_factory is None:
-                from sqlalchemy.ext.asyncio import AsyncSession
-                from sqlalchemy.orm import sessionmaker
+                from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
                 log.info("state: lazy-initialising central session factory")
-                _central_session_factory = sessionmaker(
-                    bind=get_central_engine(),
-                    class_=AsyncSession,
+                _central_session_factory = async_sessionmaker(
+                    get_central_engine(),
                     autoflush=False,
                     autocommit=False,
                     expire_on_commit=False,

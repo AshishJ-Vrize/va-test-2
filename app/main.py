@@ -12,8 +12,7 @@ from contextlib import asynccontextmanager
 
 import redis.asyncio as aioredis
 from fastapi import FastAPI
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import app.core.state as _state
 from app.config.settings import get_settings
@@ -35,9 +34,8 @@ async def lifespan(app: FastAPI):
     kv_client = KeyVaultClient()
 
     central_engine = _create_central_engine()
-    central_session_factory = sessionmaker(
-        bind=central_engine,
-        class_=AsyncSession,
+    central_session_factory = async_sessionmaker(
+        central_engine,
         autoflush=False,
         autocommit=False,
         expire_on_commit=False,
