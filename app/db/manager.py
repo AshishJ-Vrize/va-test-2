@@ -8,9 +8,8 @@ from dataclasses import dataclass
 from threading import Lock
 from typing import TYPE_CHECKING, AsyncGenerator
 
-from psycopg import OperationalError
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.db.registry import CachedTenant
 from app.db.tenant.session import make_tenant_engine, make_tenant_session_factory
@@ -24,7 +23,7 @@ log = logging.getLogger(__name__)
 @dataclass
 class _PoolEntry:
     engine: AsyncEngine
-    session_factory: sessionmaker[AsyncSession]
+    session_factory: async_sessionmaker[AsyncSession]
 
 
 def _db_name(org_name: str) -> str:
@@ -70,7 +69,7 @@ class DatabaseManager:
             await session.commit()
         except OperationalError as exc:
             await session.rollback()
-            pgcode = getattr(getattr(exc, "pgcode", None), "pgcode", None) or getattr(exc, "pgcode", None)
+            pgcode = getattr(exc.orig, "pgcode", None)
             is_auth_error = pgcode == "28P01" or (
                 "password authentication failed" in str(exc).lower()
             )
