@@ -3,6 +3,7 @@
 .env.local
 .env.*.local
 *.secret
+.claude/
 
 # MVP token cache — removed in production but guard anyway
 .token_cache.json

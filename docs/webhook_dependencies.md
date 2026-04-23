@@ -142,15 +142,16 @@ task function directly. This avoids circular imports and keeps team boundaries c
 
 | Symbol | Signature | Notes |
 |--------|----------|-------|
-| `ingest_meeting_task` | `(call_chain_id: str, org_name: str) -> None` | Celery task — fetches callRecord from Graph, parses VTT, embeds, writes to tenant DB, fans out to insights + sentiment + rules |
+| `ingest_meeting_task` | `(call_chain_id: str, org_name: str, ms_tenant_id: str \| None = None) -> None` | Celery task — fetches callRecord from Graph, parses VTT, embeds, writes to tenant DB, fans out to insights + sentiment + rules |
 
 **Registered task name must be exactly:** `"workers.tasks.ingestion.ingest_meeting_task"`
 
-**Status:** ⏳ PENDING — Workers team
+**Status:** ✅ DELIVERED — `2026-04-23` (steps 1–4 complete; steps 5–8 pending other teams)
 
 **Arguments the webhook passes:**
 - `call_chain_id` — Graph call chain ID extracted from `notification["resource"]`
 - `org_name` — `Tenant.org_name` from central DB — worker uses this to resolve the tenant DB connection
+- `ms_tenant_id` — passed directly from Graph notification `tenantId` field; task falls back to central DB lookup if absent
 
 ---
 
@@ -181,7 +182,7 @@ from app.core.security import CurrentUser
 | `require_admin` | `(current_user: CurrentUser = Depends(get_current_user)) -> CurrentUser` | FastAPI dependency — calls `get_current_user` then asserts `system_role == 'admin'`; raises HTTP 403 otherwise |
 | `get_central_db` | `() -> Generator[Session, None, None]` | FastAPI dependency — yields SQLAlchemy Session to central DB (mirrors entry in section 5 above) |
 
-**Status:** ⏳ PENDING — Scope A team
+**Status:** ✅ DELIVERED — `2026-04-22`
 
 **Webhook import (route file):**
 ```python
@@ -210,9 +211,9 @@ def register_webhook(
 | `app/core/security.py` | `CurrentUser`, `TenantInfo` | Scope A | ✅ Delivered |
 | `app/db/central/models.py` | `Tenant` model | DB team | ⏳ Pending |
 | `app/db/central/session.py` | `get_central_db` | DB team | ⏳ Pending |
-| `app/api/deps.py` | `require_admin`, `get_current_user` | Scope A | ⏳ Pending |
-| `workers/celery_app.py` | `celery_app` | Workers team | ⏳ Pending |
-| `workers/tasks/ingestion.py` | `ingest_meeting_task` | Workers team | ⏳ Pending |
+| `app/api/deps.py` | `require_admin`, `get_current_user` | Scope A | ✅ Delivered |
+| `workers/celery_app.py` | `celery_app` | Workers team | ✅ Delivered |
+| `workers/tasks/ingestion.py` | `ingest_meeting_task` | Workers team | ✅ Delivered (steps 1–4) |
 
 ---
 
