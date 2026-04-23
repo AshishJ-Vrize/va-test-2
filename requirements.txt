@@ -8,7 +8,7 @@ python-multipart>=0.0.9
 # ─── Database ─────────────────────────────────────────────────
 sqlalchemy>=2.0.0
 alembic>=1.13.0
-psycopg2-binary>=2.9.9
+psycopg[binary]>=3.0.0
 pgvector>=0.3.0
 
 # ─── Microsoft Graph / MSAL ───────────────────────────────────
