@@ -5,9 +5,9 @@ import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
+from fastapi import Request
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
 
 from app.config.settings import get_settings
 
@@ -44,7 +44,7 @@ def _create_central_engine() -> AsyncEngine:
     )
 
 
-async def get_central_db(request) -> AsyncGenerator[AsyncSession, None]:
+async def get_central_db(request: Request) -> AsyncGenerator[AsyncSession, None]:
     """
     FastAPI dependency — yields a central DB async session.
     Reads the session factory from app.state (set by lifespan in main.py).

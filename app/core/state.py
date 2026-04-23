@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import redis.asyncio as redis_lib
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
-    from sqlalchemy.orm import sessionmaker
 
     from app.core.keyvault import KeyVaultClient
     from app.core.security import JWKSCache, TokenVerifier
@@ -37,7 +36,7 @@ _kv_client: KeyVaultClient | None = None
 _db_manager: DatabaseManager | None = None
 _tenant_registry: TenantRegistry | None = None
 _central_engine: AsyncEngine | None = None
-_central_session_factory: sessionmaker[AsyncSession] | None = None
+_central_session_factory: async_sessionmaker[AsyncSession] | None = None
 _redis: redis_lib.Redis | None = None
 _jwks_cache: JWKSCache | None = None
 _token_verifier: TokenVerifier | None = None
@@ -89,12 +88,12 @@ def get_central_engine() -> AsyncEngine:
     return _central_engine
 
 
-def get_central_session_factory() -> sessionmaker[AsyncSession]:
+def get_central_session_factory() -> async_sessionmaker[AsyncSession]:
     global _central_session_factory
     if _central_session_factory is None:
         with _lock:
             if _central_session_factory is None:
-                from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+                from sqlalchemy.ext.asyncio import async_sessionmaker
                 log.info("state: lazy-initialising central session factory")
                 _central_session_factory = async_sessionmaker(
                     get_central_engine(),
