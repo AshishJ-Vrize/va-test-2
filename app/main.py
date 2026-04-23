@@ -86,7 +86,9 @@ app = FastAPI(
 )
 
 from app.api.middleware.tenant import RequestTracingMiddleware  # noqa: E402
+from app.api.routes.ingest import router as ingest_router      # noqa: E402
 from app.api.routes.webhook import router as webhook_router    # noqa: E402
 
 app.add_middleware(RequestTracingMiddleware)
 app.include_router(webhook_router, prefix="/webhook", tags=["webhook"])
+app.include_router(ingest_router)
