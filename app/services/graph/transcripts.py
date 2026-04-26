@@ -43,7 +43,7 @@ class TranscriptsMixin:
     all of which are defined on GraphClient.
     """
 
-    def get_transcripts(
+    async def get_transcripts(
         self,
         meeting_id: str,
         user_id: str | None = None,
@@ -80,7 +80,7 @@ class TranscriptsMixin:
             meeting_id, user_id, path,
         )
 
-        result = self.get(path)
+        result = await self.get(path)
         transcripts = result.get("value", [])
 
         if not transcripts:
@@ -96,7 +96,7 @@ class TranscriptsMixin:
 
         return transcripts
 
-    def get_transcript_content(
+    async def get_transcript_content(
         self,
         meeting_id: str,
         transcript_id: str,
@@ -136,7 +136,7 @@ class TranscriptsMixin:
             meeting_id, transcript_id, user_id, path,
         )
 
-        content = self.get_text(path, params={"$format": "text/vtt"}, timeout=60.0)
+        content = await self.get_text(path, params={"$format": "text/vtt"}, timeout=60.0)
 
         logger.info(
             "get_transcript_content: success | meeting_id=%s | "
