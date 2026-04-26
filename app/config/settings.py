@@ -23,7 +23,7 @@ class Settings(BaseSettings):
 
     # ── Webhook — optional until webhook team integrates ───────────────────
     WEBHOOK_BASE_URL: str = ""
-    WEBHOOK_CLIENT_STATE: str = ""
+    WEBHOOK_CLIENT_STATE: str
 
     # ── Azure OpenAI ───────────────────────────────────────────────────────
     AZURE_OPENAI_ENDPOINT: str
