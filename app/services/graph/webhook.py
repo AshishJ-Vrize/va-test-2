@@ -4,8 +4,8 @@
 #             app/services/graph/exceptions.py (DELIVERED)
 #             app/config/settings.py (DELIVERED)
 #             app/db/central/models.py — Tenant model (DELIVERED)
-#             workers/celery_app.py — celery_app instance (PENDING — Workers team)
-#             workers/tasks/ingestion.py — ingest_meeting_task (PENDING — Workers team)
+#             workers/celery_app.py — celery_app instance (DELIVERED)
+#             workers/tasks/ingestion.py — ingest_meeting_task (DELIVERED)
 # See docs/webhook_dependencies.md for full dependency tracking.
 
 import asyncio
@@ -19,6 +19,7 @@ from app.config.settings import get_settings
 from app.services.graph.client import GraphClient, get_access_token_app
 from app.services.graph.exceptions import GraphClientError, TokenExpiredError
 from app.db.central.models import Tenant
+from workers.celery_app import celery_app
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -252,19 +253,12 @@ async def handle_notification(payload: dict, db: "AsyncSession") -> dict:
         were dispatched vs skipped (invalid clientState, unknown tenant, dedup).
 
     Design notes:
-        - celery_app is imported inside the function body so that this module can
-          be imported before workers/celery_app.py is delivered. Move to top-level
-          once the Workers team delivers that file.
         - celery_app.send_task dispatches by task name string — no direct import
           of ingest_meeting_task — keeping team boundaries clean.
         - The function always returns 200-class data; individual notification
           failures are logged and counted as "skipped" rather than raising, so
           Graph does not keep retrying a batch because one item was bad.
     """
-    # Deferred import — celery_app is PENDING Workers team.
-    # Move to top-level once workers/celery_app.py is delivered.
-    from workers.celery_app import celery_app          # noqa: PLC0415  PENDING Workers team
-
     notifications = payload.get("value", [])
     accepted = 0
     skipped = 0

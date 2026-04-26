@@ -14,8 +14,7 @@ celery_app = Celery(
     backend=settings.REDIS_URL,
 )
 
-# Discovers all @celery_app.task-decorated functions in workers/tasks/*.py.
-# This registers them under their full dotted name, e.g.:
-#   "workers.tasks.ingestion.ingest_meeting_task"
-# which must match exactly what webhook.py passes to send_task().
-celery_app.autodiscover_tasks(["workers.tasks"])
+# Import task modules AFTER celery_app is fully defined.
+# Each module uses @celery_app.task — importing here registers them.
+# Must be at the bottom to avoid circular imports.
+from workers.tasks import ingestion  # noqa: E402, F401
