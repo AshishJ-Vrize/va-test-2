@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, AsyncGenerator
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from app.config.settings import get_settings
 from app.db.registry import CachedTenant
 from app.db.tenant.session import make_tenant_engine, make_tenant_session_factory
 
@@ -110,7 +111,7 @@ class DatabaseManager:
 
     def _build_url(self, cached_tenant: CachedTenant) -> str:
         secret = self._kv.get_db_secret(cached_tenant.org_name)
-        db_user = os.environ["TENANT_DB_USER"]
+        db_user = get_settings().TENANT_DB_USER
         db_host = cached_tenant.db_host
         db_name = _db_name(cached_tenant.org_name)
         # psycopg3 async driver — postgresql+psycopg_async://

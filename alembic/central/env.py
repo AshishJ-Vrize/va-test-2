@@ -9,9 +9,10 @@ from sqlalchemy import engine_from_config, pool
 # Resolve project root so `app.*` imports work regardless of where alembic is invoked from
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from app.config.settings import settings  # noqa: E402
+from app.config.settings import get_settings  # noqa: E402
 from app.db.central.models import Base  # noqa: E402
 
+settings = get_settings()
 target_metadata = Base.metadata
 
 config = context.config

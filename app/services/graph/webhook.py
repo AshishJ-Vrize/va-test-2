@@ -3,22 +3,26 @@
 # Depends on: app/services/graph/client.py (DELIVERED)
 #             app/services/graph/exceptions.py (DELIVERED)
 #             app/config/settings.py (DELIVERED)
-#             app/db/central/models.py — Tenant model (PENDING — DB team)
-#             workers/celery_app.py — celery_app instance (PENDING — Workers team)
-#             workers/tasks/ingestion.py — ingest_meeting_task (PENDING — Workers team)
+#             app/db/central/models.py — Tenant model (DELIVERED)
+#             workers/celery_app.py — celery_app instance (DELIVERED)
+#             workers/tasks/ingestion.py — ingest_meeting_task (DELIVERED)
 # See docs/webhook_dependencies.md for full dependency tracking.
 
+import asyncio
 import logging
-import threading
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
+
+from sqlalchemy import select
 
 from app.config.settings import get_settings
 from app.services.graph.client import GraphClient, get_access_token_app
 from app.services.graph.exceptions import GraphClientError, TokenExpiredError
+from app.db.central.models import Tenant
+from workers.celery_app import celery_app
 
 if TYPE_CHECKING:
-    from sqlalchemy.orm import Session
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -29,15 +33,15 @@ settings = get_settings()
 # within a short window so we don't enqueue the same meeting twice.
 # TTL is enforced by _prune_seen(); memory footprint is O(burst_size).
 
-_seen_lock = threading.Lock()
+_seen_lock = asyncio.Lock()
 _seen: dict[str, datetime] = {}          # key → first-seen UTC datetime
 _DEDUP_WINDOW_SECONDS = 30
 
 
-def _is_duplicate(key: str) -> bool:
+async def _is_duplicate(key: str) -> bool:
     """Return True if key was seen within the dedup window; record it otherwise."""
     now = datetime.now(timezone.utc)
-    with _seen_lock:
+    async with _seen_lock:
         _prune_seen(now)
         if key in _seen:
             return True
@@ -55,7 +59,7 @@ def _prune_seen(now: datetime) -> None:
 
 # ── Subscription management ───────────────────────────────────────────────────
 
-def register_webhook(
+async def register_webhook(
     ms_tenant_id: str,
     org_name: str,
     notification_url: str,
@@ -75,7 +79,7 @@ def register_webhook(
     Raises:
         GraphClientError: Graph rejected the request or a network error occurred.
     """
-    access_token = get_access_token_app(ms_tenant_id)
+    access_token = await asyncio.to_thread(get_access_token_app, ms_tenant_id)
     client = GraphClient(access_token)
 
     expiration = (
@@ -96,7 +100,7 @@ def register_webhook(
     )
 
     try:
-        subscription = client.post("/subscriptions", body)
+        subscription = await client.post("/subscriptions", body)
     except TokenExpiredError as exc:
         logger.error(
             "register_webhook: app token rejected (401) — admin consent may be missing | "
@@ -120,7 +124,7 @@ def register_webhook(
     return subscription
 
 
-def renew_webhook(
+async def renew_webhook(
     ms_tenant_id: str,
     org_name: str,
     subscription_id: str,
@@ -142,7 +146,7 @@ def renew_webhook(
     Raises:
         GraphClientError: Graph rejected the renewal or a network error occurred.
     """
-    access_token = get_access_token_app(ms_tenant_id)
+    access_token = await asyncio.to_thread(get_access_token_app, ms_tenant_id)
     client = GraphClient(access_token)
 
     new_expiration = (
@@ -156,7 +160,7 @@ def renew_webhook(
     )
 
     try:
-        updated = client.patch(f"/subscriptions/{subscription_id}", body)
+        updated = await client.patch(f"/subscriptions/{subscription_id}", body)
     except TokenExpiredError as exc:
         logger.error(
             "renew_webhook: app token rejected (401) — admin consent may be missing | "
@@ -180,7 +184,7 @@ def renew_webhook(
     return updated
 
 
-def delete_webhook(
+async def delete_webhook(
     ms_tenant_id: str,
     org_name: str,
     subscription_id: str,
@@ -196,7 +200,7 @@ def delete_webhook(
     Raises:
         GraphClientError: Graph rejected the deletion or a network error occurred.
     """
-    access_token = get_access_token_app(ms_tenant_id)
+    access_token = await asyncio.to_thread(get_access_token_app, ms_tenant_id)
     client = GraphClient(access_token)
 
     logger.info(
@@ -204,7 +208,7 @@ def delete_webhook(
     )
 
     try:
-        client.delete(f"/subscriptions/{subscription_id}")
+        await client.delete(f"/subscriptions/{subscription_id}")
     except TokenExpiredError as exc:
         logger.error(
             "delete_webhook: app token rejected (401) — admin consent may be missing | "
@@ -227,7 +231,7 @@ def delete_webhook(
 
 # ── Notification handling ─────────────────────────────────────────────────────
 
-def handle_notification(payload: dict, db: "Session") -> dict:
+async def handle_notification(payload: dict, db: "AsyncSession") -> dict:
     """
     Process a Graph change notification payload for callRecords.
 
@@ -241,28 +245,20 @@ def handle_notification(payload: dict, db: "Session") -> dict:
     Args:
         payload: Parsed JSON body from Graph — contains a "value" list of
                  notification objects.
-        db:      Central DB SQLAlchemy Session (injected by FastAPI dependency
-                 get_central_db — PENDING DB team).
+        db:      Central DB AsyncSession (injected by FastAPI dependency
+                 get_central_db).
 
     Returns:
         {"accepted": <int>, "skipped": <int>} summary of how many notifications
         were dispatched vs skipped (invalid clientState, unknown tenant, dedup).
 
     Design notes:
-        - We import Tenant and celery_app inside the function body so that this
-          module can be imported and unit-tested before the DB team and Workers
-          team deliver their files. A top-level import would crash at startup.
         - celery_app.send_task dispatches by task name string — no direct import
           of ingest_meeting_task — keeping team boundaries clean.
         - The function always returns 200-class data; individual notification
           failures are logged and counted as "skipped" rather than raising, so
           Graph does not keep retrying a batch because one item was bad.
     """
-    # Deferred imports — these files are PENDING from other teams.
-    # Replace with top-level imports once DB team and Workers team deliver.
-    from app.db.central.models import Tenant          # noqa: PLC0415  PENDING DB team
-    from workers.celery_app import celery_app          # noqa: PLC0415  PENDING Workers team
-
     notifications = payload.get("value", [])
     accepted = 0
     skipped = 0
@@ -307,9 +303,10 @@ def handle_notification(payload: dict, db: "Session") -> dict:
                 continue
 
             # ── Step 3: tenant lookup ─────────────────────────────────────────
-            tenant = db.query(Tenant).filter(
-                Tenant.ms_tenant_id == notification_tenant_id
-            ).first()
+            result = await db.execute(
+                select(Tenant).where(Tenant.ms_tenant_id == notification_tenant_id)
+            )
+            tenant = result.scalars().first()
 
             if tenant is None:
                 logger.warning(
@@ -330,7 +327,7 @@ def handle_notification(payload: dict, db: "Session") -> dict:
 
             # ── Step 4: deduplication ─────────────────────────────────────────
             dedup_key = f"{notification_tenant_id}:{call_chain_id}"
-            if _is_duplicate(dedup_key):
+            if await _is_duplicate(dedup_key):
                 logger.debug(
                     "Notification deduplicated | org=%s | call_chain_id=%s",
                     tenant.org_name, call_chain_id,
@@ -343,7 +340,7 @@ def handle_notification(payload: dict, db: "Session") -> dict:
             # Task name must match the registered name in workers/tasks/ingestion.py.
             celery_app.send_task(
                 "workers.tasks.ingestion.ingest_meeting_task",
-                args=[call_chain_id, tenant.org_name],
+                args=[call_chain_id, tenant.org_name, notification_tenant_id],
             )
 
             logger.info(
