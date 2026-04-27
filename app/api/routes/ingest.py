@@ -14,6 +14,14 @@ Flow:
   7. Run the ingestion pipeline (parse → chunk → embed → persist).
   8. Commit the full transaction and return 200.
 
+
+Token source (CONTEXT.md Open Question #1 — do NOT resolve here):
+  graph_token is a delegated Microsoft Graph token acquired by the frontend via
+  MSAL.js. It must include the scopes: User.Read, OnlineMeetings.Read,
+  OnlineMeetingTranscript.Read.All.  When Open Question #1 is settled (OBO vs
+  frontend-passed token), only the GraphClient instantiation line in this file
+  changes.
+
 DB commit ownership:
   This route owns the transaction. run_ingestion_pipeline() never calls
   db.commit(). All commits happen here, including the commit that persists the
@@ -29,7 +37,6 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.api.deps import get_current_user, get_tenant_db
 from app.core.security import CurrentUser
 from app.db.central.models import CreditPricing
