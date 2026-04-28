@@ -303,10 +303,19 @@ async def handle_notification(payload: dict, db: "AsyncSession") -> dict:
                 continue
 
             # ── Step 3: tenant lookup ─────────────────────────────────────────
-            result = await db.execute(
-                select(Tenant).where(Tenant.ms_tenant_id == notification_tenant_id)
-            )
-            tenant = result.scalars().first()
+            try:
+                result = await db.execute(
+                    select(Tenant).where(Tenant.ms_tenant_id == notification_tenant_id)
+                )
+                tenant = result.scalars().first()
+            except Exception as db_exc:
+                logger.exception(
+                    "handle_notification: central DB error during tenant lookup — skipping notification | "
+                    "tenantId=%s | call_chain_id=%s | error=%s",
+                    notification_tenant_id, call_chain_id, db_exc,
+                )
+                skipped += 1
+                continue
 
             if tenant is None:
                 logger.warning(
