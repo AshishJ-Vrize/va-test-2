@@ -54,10 +54,15 @@ def render_item(type_: str, obj: Any, autogen_context: Any) -> str | bool:
     return False
 
 
+def _version_table() -> str:
+    return config.get_main_option("version_table") or "alembic_version_tenant"
+
+
 def run_migrations_offline() -> None:
     context.configure(
         url=_get_url(),
         target_metadata=target_metadata,
+        version_table=_version_table(),
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
@@ -84,6 +89,7 @@ def run_migrations_online() -> None:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
+            version_table=_version_table(),
             compare_type=True,
             compare_server_default=True,
             transaction_per_migration=True,

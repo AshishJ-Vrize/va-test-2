@@ -28,6 +28,7 @@ class _PoolEntry:
 
 
 def _db_name(org_name: str) -> str:
+    # DB naming convention: va_{org_name} (e.g. va_vrize for org_name="vrize")
     return f"va_{org_name}"
 
 
