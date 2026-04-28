@@ -329,7 +329,19 @@ class GraphClient(MeetingsMixin, TranscriptsMixin):
                     return response.text
                 if not expect_json:
                     return None
-                return response.json()
+                try:
+                    return response.json()
+                except Exception as exc:
+                    self._log.error(
+                        "Graph returned 2xx but body is not valid JSON | "
+                        "method=%s | url=%s | status=%s | body_preview=%.200s | error=%s",
+                        method, url, response.status_code, response.text, exc,
+                    )
+                    raise GraphClientError(
+                        f"Graph API {response.status_code} on {method} {path} returned "
+                        f"non-JSON body: {exc}. body_preview={response.text[:200]!r}",
+                        status_code=response.status_code,
+                    ) from exc
 
         # Should never reach here — loop always returns or raises
         raise GraphClientError(  # pragma: no cover

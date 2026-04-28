@@ -84,11 +84,19 @@ async def _ingest_async(
             "org=%s | call_chain_id=%s",
             org_name, call_chain_id,
         )
-        async with central_session() as db:
-            result = await db.execute(
-                select(Tenant).where(Tenant.org_name == org_name)
+        try:
+            async with central_session() as db:
+                result = await db.execute(
+                    select(Tenant).where(Tenant.org_name == org_name)
+                )
+                tenant = result.scalars().first()
+        except Exception as exc:
+            logger.exception(
+                "ingest_meeting_task: central DB error during tenant lookup — retrying | "
+                "org=%s | call_chain_id=%s | error=%s",
+                org_name, call_chain_id, exc,
             )
-            tenant = result.scalars().first()
+            raise
 
         if tenant is None:
             logger.error(
@@ -202,16 +210,24 @@ async def _ingest_async(
         )
         return
 
-    async with db_manager.get_session(ms_tenant_id, cached_tenant) as tenant_db:
-        platform_user_result = await tenant_db.execute(
-            select(User)
-            .where(
-                User.graph_id.in_(all_participant_graph_ids),
-                User.is_active.is_(True),
+    try:
+        async with db_manager.get_session(ms_tenant_id, cached_tenant) as tenant_db:
+            platform_user_result = await tenant_db.execute(
+                select(User)
+                .where(
+                    User.graph_id.in_(all_participant_graph_ids),
+                    User.is_active.is_(True),
+                )
+                .limit(1)
             )
-            .limit(1)
+            platform_user = platform_user_result.scalar_one_or_none()
+    except Exception as exc:
+        logger.exception(
+            "ingest_meeting_task: tenant DB error during platform user gate — retrying | "
+            "org=%s | tenant=%s | call_chain_id=%s | error=%s",
+            org_name, ms_tenant_id, call_chain_id, exc,
         )
-        platform_user = platform_user_result.scalar_one_or_none()
+        raise
 
     if platform_user is None:
         logger.info(
@@ -332,28 +348,63 @@ async def _ingest_async(
     # ── Step 5: credit pricing ────────────────────────────────────────────────
     # cached_tenant already resolved in Step 3.5 (platform user gate).
 
-    async with central_session() as central_db:
-        pricing_result = await central_db.execute(
-            select(CreditPricing).where(CreditPricing.plan == cached_tenant.plan)
+    try:
+        async with central_session() as central_db:
+            pricing_result = await central_db.execute(
+                select(CreditPricing).where(CreditPricing.plan == cached_tenant.plan)
+            )
+            pricing = pricing_result.scalar_one_or_none()
+    except Exception as exc:
+        logger.exception(
+            "ingest_meeting_task: central DB error during credit pricing lookup — retrying | "
+            "org=%s | tenant=%s | plan=%s | error=%s",
+            org_name, ms_tenant_id, cached_tenant.plan, exc,
         )
-        pricing = pricing_result.scalar_one_or_none()
+        raise
 
     credits_per_minute: int = pricing.credits_per_minute if pricing else 1
 
     # ── Step 6: upsert meeting + participants in tenant DB ────────────────────
-    # Real display names are fetched from Graph via get_user_by_id (read-only,
-    # no DB writes). Falls back to UPN if the call fails (e.g. external user).
-    # No user records are created here — the users table is platform-only.
+    # All get_user_by_id calls are fired in parallel via asyncio.gather so the
+    # total wait is one round-trip regardless of participant count.
+    # return_exceptions=True means one failed lookup does not cancel the others.
+    # Falls back to UPN if a lookup fails. No user records created — platform-only.
 
     participants_raw = meeting.get("participants", {})
     organizer_raw = participants_raw.get("organizer", {})
     organizer_upn: str = organizer_raw.get("upn") or ""
 
-    try:
-        organizer_profile = await client.get_user_by_id(organizer_graph_id)
-    except (TokenExpiredError, GraphClientError):
-        organizer_profile = None
+    attendees_raw = [
+        a for a in participants_raw.get("attendees", [])
+        if a.get("identity", {}).get("user", {}).get("id")
+    ]
+    attendee_graph_ids: list[str] = [
+        a["identity"]["user"]["id"] for a in attendees_raw
+    ]
+    attendee_upns: list[str] = [
+        a.get("upn") or "" for a in attendees_raw
+    ]
 
+    # Fire all profile lookups simultaneously
+    all_graph_ids = [organizer_graph_id] + attendee_graph_ids
+    raw_results = await asyncio.gather(
+        *[client.get_user_by_id(gid) for gid in all_graph_ids],
+        return_exceptions=True,
+    )
+    # Normalize: exceptions → None (fallback to UPN), log each failure
+    profiles = []
+    for gid, r in zip(all_graph_ids, raw_results):
+        if isinstance(r, dict):
+            profiles.append(r)
+        else:
+            logger.warning(
+                "ingest_meeting_task: get_user_by_id failed — falling back to UPN | "
+                "org=%s | graph_id=%s | error=%s",
+                org_name, gid, r,
+            )
+            profiles.append(None)
+
+    organizer_profile = profiles[0]
     organizer_display_name: str = (
         (organizer_profile or {}).get("displayName")
         or organizer_upn
@@ -397,28 +448,16 @@ async def _ingest_async(
             role="organizer",
         )
 
-        for attendee_raw in participants_raw.get("attendees", []):
-            attendee_graph_id: str | None = (
-                attendee_raw.get("identity", {}).get("user", {}).get("id")
-            )
-            if not attendee_graph_id:
-                continue
-            attendee_upn: str = attendee_raw.get("upn") or ""
-
-            try:
-                attendee_profile = await client.get_user_by_id(attendee_graph_id)
-            except (TokenExpiredError, GraphClientError):
-                attendee_profile = None
-
+        for i, attendee_graph_id in enumerate(attendee_graph_ids):
+            attendee_profile = profiles[i + 1]
+            upn = attendee_upns[i]
             attendee_name: str | None = (
-                (attendee_profile or {}).get("displayName")
-                or attendee_upn
-                or None
+                (attendee_profile or {}).get("displayName") or upn or None
             )
             attendee_email: str | None = (
                 (attendee_profile or {}).get("mail")
                 or (attendee_profile or {}).get("userPrincipalName")
-                or attendee_upn
+                or upn
                 or None
             )
             await _upsert_participant(

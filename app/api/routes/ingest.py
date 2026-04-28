@@ -3,9 +3,10 @@ POST /ingest/meeting — Manual meeting ingestion route.
 
 Flow:
   1. Use the caller's Graph token to look up the meeting by join URL.
-  2. Upsert the organizer (and any attendees with a known Graph ID) in the
-     tenant users table.
-  3. Upsert the meeting row and participant rows.
+  2. Resolve display names for the organizer and all attendees via parallel
+     get_user_by_id calls. Falls back to UPN on any lookup failure.
+  3. Upsert the meeting row and participant rows (no writes to users table —
+     users table is platform-only, populated via SSO login).
   4. Fetch the transcript list from Graph.
      → If no transcript yet: commit the meeting rows, return 202 Accepted.
        Teams takes 5–10 minutes after a meeting ends to process transcripts.
@@ -28,6 +29,7 @@ DB commit ownership:
   "failed" status when the pipeline raises.
 """
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from math import ceil
@@ -41,7 +43,7 @@ from app.api.deps import get_current_user, get_tenant_db
 from app.core.security import CurrentUser
 from app.db.central.models import CreditPricing
 from app.db.central.session import get_central_db
-from app.db.tenant.models import Meeting, MeetingParticipant, User
+from app.db.tenant.models import Meeting, MeetingParticipant
 from app.services.graph.client import GraphClient
 from app.services.graph.exceptions import (
     GraphClientError,
@@ -123,20 +125,44 @@ async def ingest_meeting(
         meeting_graph_id, subject, current_user.tenant.org_name,
     )
 
-    # ── Step 2: resolve organizer display name ────────────────────────────────
+    # ── Step 2: resolve display names for organizer + all attendees ───────────
+    # All get_user_by_id calls fire in parallel. return_exceptions=True means
+    # one failed lookup does not cancel others — falls back to UPN.
     participants_raw = gm.get("participants", {})
     organizer_raw = participants_raw.get("organizer", {})
     organizer_graph_id: str = (
         organizer_raw.get("identity", {}).get("user", {}).get("id")
         or current_user.graph_id
     )
-    organizer_upn: str | None = organizer_raw.get("upn")
+    organizer_upn: str = organizer_raw.get("upn") or ""
 
-    try:
-        organizer_profile = await gc.get_user_by_id(organizer_upn or organizer_graph_id)
-    except (TokenExpiredError, GraphClientError):
-        organizer_profile = None
+    attendees_raw = [
+        a for a in participants_raw.get("attendees", [])
+        if a.get("identity", {}).get("user", {}).get("id")
+    ]
+    attendee_graph_ids: list[str] = [
+        a["identity"]["user"]["id"] for a in attendees_raw
+    ]
+    attendee_upns: list[str] = [a.get("upn") or "" for a in attendees_raw]
 
+    all_graph_ids = [organizer_graph_id] + attendee_graph_ids
+    raw_results = await asyncio.gather(
+        *[gc.get_user_by_id(gid) for gid in all_graph_ids],
+        return_exceptions=True,
+    )
+    profiles = []
+    for gid, r in zip(all_graph_ids, raw_results):
+        if isinstance(r, dict):
+            profiles.append(r)
+        else:
+            logger.warning(
+                "ingest_meeting: get_user_by_id failed — falling back to UPN | "
+                "tenant=%s | graph_id=%s | error=%s",
+                current_user.tenant.org_name, gid, r,
+            )
+            profiles.append(None)
+
+    organizer_profile = profiles[0]
     organizer_display_name: str = (
         (organizer_profile or {}).get("displayName")
         or organizer_upn
@@ -149,51 +175,68 @@ async def ingest_meeting(
         or ""
     )
 
-    # ── Step 3: upsert organizer user → meeting → participants ────────────────
-    organizer_user = await _upsert_user(
-        tenant_db,
-        graph_id=organizer_graph_id,
-        email=organizer_email,
-        display_name=organizer_display_name,
-    )
-    await tenant_db.flush()
-
-    meeting_row = await _upsert_meeting(
-        tenant_db,
-        meeting_graph_id=meeting_graph_id,
-        organizer_id=organizer_user.id,
-        subject=subject,
-        meeting_date=start_dt or datetime.now(timezone.utc),
-        meeting_end_date=end_dt,
-        duration_minutes=duration_minutes,
-        join_url=join_url_from_graph,
-    )
-    await tenant_db.flush()
-
-    await _upsert_participant(
-        tenant_db, meeting_id=meeting_row.id, user_id=organizer_user.id, role="organizer",
-    )
-
-    for attendee_raw in participants_raw.get("attendees", []):
-        attendee_graph_id: str | None = (
-            attendee_raw.get("identity", {}).get("user", {}).get("id")
-        )
-        if not attendee_graph_id:
-            continue
-
-        attendee_upn: str = attendee_raw.get("upn") or ""
-        attendee_user = await _upsert_user(
+    # ── Step 3: upsert meeting + participants ─────────────────────────────────
+    # No writes to the users table — it is platform-only (SSO login).
+    # Participant identity is stored directly on meeting_participants rows.
+    try:
+        meeting_row = await _upsert_meeting(
             tenant_db,
-            graph_id=attendee_graph_id,
-            email=attendee_upn,
-            display_name=attendee_upn or "Unknown Attendee",
+            meeting_graph_id=meeting_graph_id,
+            organizer_graph_id=organizer_graph_id,
+            organizer_name=organizer_display_name,
+            organizer_email=organizer_email,
+            subject=subject,
+            meeting_date=start_dt or datetime.now(timezone.utc),
+            meeting_end_date=end_dt,
+            duration_minutes=duration_minutes,
+            join_url=join_url_from_graph,
         )
         await tenant_db.flush()
+
         await _upsert_participant(
-            tenant_db, meeting_id=meeting_row.id, user_id=attendee_user.id, role="attendee",
+            tenant_db,
+            meeting_id=meeting_row.id,
+            participant_graph_id=organizer_graph_id,
+            participant_name=organizer_display_name,
+            participant_email=organizer_email,
+            role="organizer",
         )
 
-    await tenant_db.flush()
+        for i, attendee_graph_id in enumerate(attendee_graph_ids):
+            attendee_profile = profiles[i + 1]
+            attendee_upn = attendee_upns[i]
+            attendee_name: str = (
+                (attendee_profile or {}).get("displayName")
+                or attendee_upn
+                or "Unknown Attendee"
+            )
+            attendee_email: str = (
+                (attendee_profile or {}).get("mail")
+                or (attendee_profile or {}).get("userPrincipalName")
+                or attendee_upn
+                or ""
+            )
+            await _upsert_participant(
+                tenant_db,
+                meeting_id=meeting_row.id,
+                participant_graph_id=attendee_graph_id,
+                participant_name=attendee_name,
+                participant_email=attendee_email,
+                role="attendee",
+            )
+
+        await tenant_db.flush()
+
+    except Exception as exc:
+        logger.exception(
+            "DB error during meeting/participant upsert | meeting_graph_id=%s | "
+            "tenant=%s | error=%s",
+            meeting_graph_id, current_user.tenant.org_name, exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Failed to save meeting data. Please try again later.",
+        ) from exc
 
     # ── Step 4: check whether the transcript is available ────────────────────
     try:
@@ -252,10 +295,21 @@ async def ingest_meeting(
         ) from exc
 
     # ── Step 6: look up credit pricing ────────────────────────────────────────
-    result = await central_db.execute(
-        select(CreditPricing).where(CreditPricing.plan == current_user.tenant.plan)
-    )
-    pricing = result.scalar_one_or_none()
+    try:
+        pricing_result = await central_db.execute(
+            select(CreditPricing).where(CreditPricing.plan == current_user.tenant.plan)
+        )
+        pricing = pricing_result.scalar_one_or_none()
+    except Exception as exc:
+        logger.exception(
+            "Central DB error during credit pricing lookup | tenant=%s | plan=%s | error=%s",
+            current_user.tenant.org_name, current_user.tenant.plan, exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Failed to retrieve pricing data. Please try again later.",
+        ) from exc
+
     credits_per_minute: int = pricing.credits_per_minute if pricing else 1
 
     logger.info(
@@ -322,51 +376,37 @@ def _compute_duration(start: datetime | None, end: datetime | None) -> int | Non
     return max(1, ceil((end - start).total_seconds() / 60))
 
 
-async def _upsert_user(
-    db: AsyncSession,
-    *,
-    graph_id: str,
-    email: str,
-    display_name: str,
-) -> User:
-    result = await db.execute(select(User).where(User.graph_id == graph_id))
-    user = result.scalar_one_or_none()
-    if user is None:
-        user = User(
-            graph_id=graph_id,
-            email=email or graph_id,
-            display_name=display_name or "Unknown",
-            system_role="user",
-            is_active=True,
-        )
-        db.add(user)
-    else:
-        if email:
-            user.email = email
-        if display_name:
-            user.display_name = display_name
-    return user
-
-
 async def _upsert_meeting(
     db: AsyncSession,
     *,
     meeting_graph_id: str,
-    organizer_id: UUID,
+    organizer_graph_id: str,
+    organizer_name: str | None,
+    organizer_email: str | None,
     subject: str,
     meeting_date: datetime,
     meeting_end_date: datetime | None,
     duration_minutes: int | None,
     join_url: str,
 ) -> Meeting:
-    result = await db.execute(
-        select(Meeting).where(Meeting.meeting_graph_id == meeting_graph_id)
-    )
+    try:
+        result = await db.execute(
+            select(Meeting).where(Meeting.meeting_graph_id == meeting_graph_id)
+        )
+    except Exception as exc:
+        logger.exception(
+            "_upsert_meeting: DB error querying meeting | meeting_graph_id=%s | error=%s",
+            meeting_graph_id, exc,
+        )
+        raise
+
     meeting = result.scalar_one_or_none()
     if meeting is None:
         meeting = Meeting(
             meeting_graph_id=meeting_graph_id,
-            organizer_id=organizer_id,
+            organizer_graph_id=organizer_graph_id,
+            organizer_name=organizer_name,
+            organizer_email=organizer_email,
             meeting_subject=subject,
             meeting_date=meeting_date,
             meeting_end_date=meeting_end_date,
@@ -377,6 +417,9 @@ async def _upsert_meeting(
         )
         db.add(meeting)
     else:
+        meeting.organizer_graph_id = organizer_graph_id
+        meeting.organizer_name = organizer_name
+        meeting.organizer_email = organizer_email
         meeting.meeting_subject = subject
         meeting.meeting_date = meeting_date
         meeting.meeting_end_date = meeting_end_date
@@ -390,20 +433,38 @@ async def _upsert_participant(
     db: AsyncSession,
     *,
     meeting_id: UUID,
-    user_id: UUID,
+    participant_graph_id: str,
+    participant_name: str | None,
+    participant_email: str | None,
     role: str,
     granted_by: UUID | None = None,
 ) -> None:
-    result = await db.execute(
-        select(MeetingParticipant).where(
-            MeetingParticipant.meeting_id == meeting_id,
-            MeetingParticipant.user_id == user_id,
+    try:
+        result = await db.execute(
+            select(MeetingParticipant).where(
+                MeetingParticipant.meeting_id == meeting_id,
+                MeetingParticipant.participant_graph_id == participant_graph_id,
+            )
         )
-    )
-    if result.scalar_one_or_none() is None:
+    except Exception as exc:
+        logger.exception(
+            "_upsert_participant: DB error querying participant | "
+            "meeting_id=%s | participant_graph_id=%s | error=%s",
+            meeting_id, participant_graph_id, exc,
+        )
+        raise
+
+    participant = result.scalar_one_or_none()
+    if participant is None:
         db.add(MeetingParticipant(
             meeting_id=meeting_id,
-            user_id=user_id,
+            participant_graph_id=participant_graph_id,
+            participant_name=participant_name,
+            participant_email=participant_email,
             role=role,
             granted_by=granted_by,
         ))
+    else:
+        participant.participant_name = participant_name
+        participant.participant_email = participant_email
+        participant.role = role

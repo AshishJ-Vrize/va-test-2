@@ -103,7 +103,13 @@ class JWKSCache:
 
     async def _load_keys(self, force_refresh: bool) -> list[dict]:
         if not force_refresh:
-            cached_raw = await self._redis.get(JWKS_REDIS_KEY)
+            try:
+                cached_raw = await self._redis.get(JWKS_REDIS_KEY)
+            except Exception as exc:
+                self._log.warning(
+                    "JWKS: Redis GET failed — falling through to Microsoft fetch | error=%s", exc
+                )
+                cached_raw = None
             if cached_raw:
                 self._log.debug("JWKS: served from Redis cache")
                 return json.loads(cached_raw)["keys"]
@@ -128,11 +134,16 @@ class JWKSCache:
 
         data = response.json()
         key_count = len(data.get("keys", []))
-        await self._redis.setex(JWKS_REDIS_KEY, JWKS_TTL_SECONDS, json.dumps(data))
-        self._log.info(
-            "JWKS: fetched and cached | key_count=%d | ttl=%ds",
-            key_count, JWKS_TTL_SECONDS,
-        )
+        try:
+            await self._redis.setex(JWKS_REDIS_KEY, JWKS_TTL_SECONDS, json.dumps(data))
+            self._log.info(
+                "JWKS: fetched and cached | key_count=%d | ttl=%ds",
+                key_count, JWKS_TTL_SECONDS,
+            )
+        except Exception as exc:
+            self._log.warning(
+                "JWKS: Redis SETEX failed — keys fetched but not cached | error=%s", exc
+            )
         return data["keys"]
 
     @staticmethod
