@@ -93,7 +93,7 @@ from app.api.routes.webhook import router as webhook_router    # noqa: E402
 from app.db.central.session import check_central_db_health     # noqa: E402
 
 app.add_middleware(RequestTracingMiddleware)
-app.include_router(webhook_router, prefix="/webhook", tags=["webhook"])
+app.include_router(webhook_router, prefix="/api/v1/webhook", tags=["webhook"])
 app.include_router(ingest_router)
 
 _health_router = APIRouter()

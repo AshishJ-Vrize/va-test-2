@@ -28,9 +28,8 @@ class _PoolEntry:
 
 
 def _db_name(org_name: str) -> str:
-    # OPEN QUESTION — CONTEXT.md §18 #3: naming convention (e.g. pg-{org_name}) not yet
-    # confirmed by provisioning team. Change only this function when confirmed.
-    return org_name
+    # DB naming convention: va_{org_name} (e.g. va_vrize for org_name="vrize")
+    return f"va_{org_name}"
 
 
 class DatabaseManager:
