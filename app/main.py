@@ -90,24 +90,16 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-from fastapi import APIRouter                                   # noqa: E402
-from fastapi.responses import JSONResponse                      # noqa: E402
 from app.api.middleware.tenant import RequestTracingMiddleware  # noqa: E402
+from app.api.routes.auth import router as auth_router          # noqa: E402
+from app.api.routes.health import router as health_router      # noqa: E402
 from app.api.routes.ingest import router as ingest_router      # noqa: E402
+from app.api.routes.meetings import router as meetings_router  # noqa: E402
 from app.api.routes.webhook import router as webhook_router    # noqa: E402
-from app.db.central.session import check_central_db_health     # noqa: E402
 
 app.add_middleware(RequestTracingMiddleware)
+app.include_router(health_router)
+app.include_router(auth_router)
 app.include_router(webhook_router, prefix="/api/v1/webhook", tags=["webhook"])
 app.include_router(ingest_router)
-
-_health_router = APIRouter()
-
-@_health_router.get("/health", tags=["health"])
-async def health_check() -> JSONResponse:
-    db_ok = await check_central_db_health()
-    if not db_ok:
-        return JSONResponse(status_code=503, content={"status": "unhealthy", "db": "unreachable"})
-    return JSONResponse(status_code=200, content={"status": "ok"})
-
-app.include_router(_health_router)
+app.include_router(meetings_router)
