@@ -48,7 +48,7 @@ class KeyVaultClient:
         settings = get_settings()
         self._log = logging.getLogger(f"{__name__}.KeyVaultClient")
 
-        credential = DefaultAzureCredential()
+        credential = DefaultAzureCredential(additionally_allowed_tenants=["*"])
         self._client = SecretClient(
             vault_url=settings.AZURE_KEYVAULT_URL,
             credential=credential,

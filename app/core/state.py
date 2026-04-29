@@ -5,8 +5,8 @@
 #
 # Celery path:   tasks import get_X() from this module. On first call, each
 #                getter creates the singleton lazily (double-checked locking).
-#                If FastAPI lifespan already ran (e.g. in a combined worker),
-#                the module-level var is already set — no duplicate creation.
+#                If FastAPI lifespan already ran, the module-level var is already
+#                set — no duplicate creation.
 #
 # Rule for new singletons: add a module-level var + getter here, then
 # initialise it in lifespan (main.py) and add it to app.state.
@@ -18,9 +18,8 @@ import threading
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    import redis as redis_lib
-    from sqlalchemy.engine import Engine
-    from sqlalchemy.orm import sessionmaker, Session
+    import redis.asyncio as redis_lib
+    from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
     from app.core.keyvault import KeyVaultClient
     from app.core.security import JWKSCache, TokenVerifier
@@ -29,16 +28,15 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-_lock = threading.Lock()
+_lock = threading.RLock()
 
 # ── Module-level singleton slots ──────────────────────────────────────────────
-# Set by lifespan on startup. Getters below initialise lazily if not set.
 
 _kv_client: KeyVaultClient | None = None
 _db_manager: DatabaseManager | None = None
 _tenant_registry: TenantRegistry | None = None
-_central_engine: Engine | None = None
-_central_session_factory: sessionmaker[Session] | None = None
+_central_engine: AsyncEngine | None = None
+_central_session_factory: async_sessionmaker[AsyncSession] | None = None
 _redis: redis_lib.Redis | None = None
 _jwks_cache: JWKSCache | None = None
 _token_verifier: TokenVerifier | None = None
@@ -79,7 +77,7 @@ def get_tenant_registry() -> TenantRegistry:
     return _tenant_registry
 
 
-def get_central_engine() -> Engine:
+def get_central_engine() -> AsyncEngine:
     global _central_engine
     if _central_engine is None:
         with _lock:
@@ -90,15 +88,15 @@ def get_central_engine() -> Engine:
     return _central_engine
 
 
-def get_central_session_factory() -> sessionmaker[Session]:
+def get_central_session_factory() -> async_sessionmaker[AsyncSession]:
     global _central_session_factory
     if _central_session_factory is None:
         with _lock:
             if _central_session_factory is None:
-                from sqlalchemy.orm import sessionmaker
+                from sqlalchemy.ext.asyncio import async_sessionmaker
                 log.info("state: lazy-initialising central session factory")
-                _central_session_factory = sessionmaker(
-                    bind=get_central_engine(),
+                _central_session_factory = async_sessionmaker(
+                    get_central_engine(),
                     autoflush=False,
                     autocommit=False,
                     expire_on_commit=False,
@@ -111,10 +109,10 @@ def get_redis() -> redis_lib.Redis:
     if _redis is None:
         with _lock:
             if _redis is None:
-                import redis as redis_lib
+                import redis.asyncio as aioredis
                 from app.config.settings import get_settings
-                log.info("state: lazy-initialising Redis client")
-                _redis = redis_lib.Redis.from_url(
+                log.info("state: lazy-initialising async Redis client")
+                _redis = aioredis.Redis.from_url(
                     get_settings().REDIS_URL, decode_responses=True
                 )
     return _redis
