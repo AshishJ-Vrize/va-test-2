@@ -18,8 +18,8 @@ class Settings(BaseSettings):
     TENANT_DB_PASSWORD: str  # Shared across all tenant DBs on the same server
 
     # ── Azure Key Vault ────────────────────────────────────────────────────
-    # Secret naming convention: db-{org_name}  ← pending team confirmation
-    # AZURE_KEYVAULT_URL: str  # Uncomment when switching to Azure Key Vault
+    # Secret naming convention: db-{org_name}
+    # AZURE_KEYVAULT_URL: str  # Uncomment when Key Vault is active
 
     # ── Redis ──────────────────────────────────────────────────────────────
     REDIS_URL: str
