@@ -194,15 +194,15 @@ async def get_current_user(
     return await _upsert_user(claims, tenant_info, tenant_db)
 
 
-async def require_admin(
+async def require_super_admin(
     current_user: CurrentUser = Depends(get_current_user),
 ) -> CurrentUser:
-    if current_user.system_role != "admin":
+    if current_user.system_role != "compliance_officer":
         log.warning(
-            "auth: non-admin attempted admin action | user_id=%s | role=%s | org=%s",
+            "auth: non-super-admin attempted super admin action | user_id=%s | role=%s | org=%s",
             str(current_user.id), current_user.system_role, current_user.tenant.org_name,
         )
-        raise HTTPException(status_code=403, detail="This action requires administrator privileges.")
+        raise HTTPException(status_code=403, detail="This action requires super admin privileges.")
     return current_user
 
 
