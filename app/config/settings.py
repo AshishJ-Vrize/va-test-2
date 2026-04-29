@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     AZURE_OPENAI_API_KEY: str
     AZURE_OPENAI_DEPLOYMENT_EMBEDDING: str  # e.g. text-embedding-3-small
     AZURE_OPENAI_DEPLOYMENT_LLM: str        # e.g. gpt-4o
+    AZURE_OPENAI_DEPLOYMENT_LLM_MINI: str = ""  # e.g. gpt-4o-mini; falls back to LLM if empty
 
     # ── Azure Text Analytics ───────────────────────────────────────────────
     # Used by sentiment team — not Sprint 1. Optional until integrated.

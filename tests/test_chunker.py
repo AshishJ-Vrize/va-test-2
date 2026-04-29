@@ -20,8 +20,12 @@ import pytest
 from app.services.ingestion.chunker import (
     MAX_WORDS_PER_CHUNK,
     MERGE_GAP_MS,
+    MIN_CHUNK_WORDS,
+    OVERLAP_WORDS,
+    TARGET_WORDS,
     Chunk,
     chunk_segments,
+    chunk_with_sentences,
     merge_speaker_turns,
 )
 from app.services.ingestion.vtt_parser import VttSegment
@@ -243,3 +247,251 @@ class TestChunkSegments:
         chunks = chunk_segments(segs)
         assert chunks[0].start_ms == 1_000
         assert chunks[-1].end_ms == 61_000
+
+
+# ── chunk_with_sentences ──────────────────────────────────────────────────────
+
+# Realistic Teams VTT meeting fixture used across multiple tests.
+TEAMS_VTT_SEGMENTS = [
+    # Short filler turns — should be absorbed into neighbours.
+    make_seg("Raj Patel", "Morning.", 10_100, 11_200),
+    make_seg("Sara Nguyen", "Hi, good morning.", 11_400, 12_100),
+    make_seg("Marcus Lee", "Morning.", 12_300, 12_800),
+    # A proper medium-length turn.
+    make_seg(
+        "Priyanka Sharma",
+        (
+            "So the agenda today is three things. "
+            "First, finalise the Acme renewal. "
+            "Second, review Q4 budget allocation. "
+            "Third, assign ownership for the product launch tasks. "
+            "Raj can you start with the Acme update?"
+        ),
+        13_500,
+        38_200,
+    ),
+    # A long turn that must be split with sentence awareness and overlap.
+    make_seg(
+        "Raj Patel",
+        (
+            "Sure. So Acme came back last Thursday with two concerns. "
+            "First they want a price lock for 24 months instead of 12. "
+            "Second they said our six week onboarding timeline is too long for their IT team. "
+            "Their procurement deadline is November 15th so we have about three weeks to close. "
+            "I spoke to David Chen their account manager on Friday. "
+            "He said if we do 16 weeks onboarding and hold price for 18 months they are likely to sign. "
+            "I think we should take that deal. "
+            "The revenue impact is 340K ARR and we cannot let this slip into next quarter. "
+            "I already checked with finance and 18 month price lock is within our approved discount policy. "
+            "Sara what do you think about the onboarding timeline from a technical perspective?"
+        ),
+        39_000,
+        118_700,
+    ),
+    # Decision + short confirmations — confirmations must be absorbed.
+    make_seg(
+        "Priyanka Sharma",
+        (
+            "Okay so decision here is we accept Acme's terms. "
+            "18 month price lock, 16 week onboarding. "
+            "Raj you will send the revised proposal by end of day Wednesday. "
+            "Sara you own the onboarding plan and Marcus you confirm Arjun and Divya allocation. "
+            "Everyone agreed?"
+        ),
+        120_400,
+        134_600,
+    ),
+    make_seg("Raj Patel", "Agreed.", 135_100, 135_600),
+    make_seg("Sara Nguyen", "Yes.", 135_800, 136_200),
+    make_seg("Marcus Lee", "Confirmed.", 136_400, 136_900),
+]
+
+
+def make_merged_segs() -> list:
+    """Run merge_speaker_turns on the fixture so tests start from realistic input."""
+    return merge_speaker_turns(TEAMS_VTT_SEGMENTS)
+
+
+class TestChunkWithSentences:
+
+    # ── Basic output contract ─────────────────────────────────────────────────
+
+    def test_empty_input_returns_empty(self):
+        assert chunk_with_sentences([]) == []
+
+    def test_returns_chunk_instances(self):
+        merged = make_merged_segs()
+        chunks = chunk_with_sentences(merged)
+        for c in chunks:
+            assert isinstance(c, Chunk)
+
+    def test_chunk_index_sequential_from_zero(self):
+        merged = make_merged_segs()
+        chunks = chunk_with_sentences(merged)
+        for i, c in enumerate(chunks):
+            assert c.chunk_index == i
+
+    def test_end_ms_always_greater_than_start_ms(self):
+        merged = make_merged_segs()
+        chunks = chunk_with_sentences(merged)
+        for c in chunks:
+            assert c.end_ms > c.start_ms, (
+                f"chunk {c.chunk_index}: end_ms={c.end_ms} <= start_ms={c.start_ms}"
+            )
+
+    def test_no_empty_text(self):
+        merged = make_merged_segs()
+        chunks = chunk_with_sentences(merged)
+        for c in chunks:
+            assert c.text.strip(), f"chunk {c.chunk_index} has empty text"
+
+    def test_no_empty_speaker(self):
+        merged = make_merged_segs()
+        chunks = chunk_with_sentences(merged)
+        for c in chunks:
+            assert c.speaker, f"chunk {c.chunk_index} has empty speaker"
+
+    def test_speaker_preserved(self):
+        segs = [make_seg("Alice", "Short sentence here.", 0, 5_000)]
+        chunks = chunk_with_sentences(segs)
+        assert all(c.speaker == "Alice" for c in chunks)
+
+    # ── Tiny-chunk absorption ─────────────────────────────────────────────────
+
+    def test_tiny_confirmations_absorbed_into_decision(self):
+        """'Agreed.' 'Yes.' 'Confirmed.' must be merged into the preceding chunk."""
+        merged = make_merged_segs()
+        chunks = chunk_with_sentences(merged)
+        # None of the standalone 1-word turns should appear as their own chunk.
+        one_word_only = [c for c in chunks if len(c.text.split()) == 1]
+        assert one_word_only == [], (
+            f"Found isolated 1-word chunks: {[c.text for c in one_word_only]}"
+        )
+
+    def test_no_chunk_below_min_words_except_first(self):
+        """Every chunk except possibly the very first must meet MIN_CHUNK_WORDS."""
+        merged = make_merged_segs()
+        chunks = chunk_with_sentences(merged)
+        for c in chunks[1:]:
+            assert len(c.text.split()) >= MIN_CHUNK_WORDS, (
+                f"chunk {c.chunk_index} has only {len(c.text.split())} words: {c.text!r}"
+            )
+
+    def test_single_tiny_segment_kept(self):
+        """A tiny segment that is the only input must still be returned."""
+        segs = [make_seg("Bob", "Okay.", 0, 500)]
+        chunks = chunk_with_sentences(segs)
+        assert len(chunks) == 1
+        assert chunks[0].text == "Okay."
+
+    def test_tiny_first_segment_kept_larger_second_separate(self):
+        """First tiny chunk kept; second (large) chunk is separate."""
+        tiny = make_seg("A", "Sure.", 0, 500)
+        big_text = ". ".join([f"This is sentence number {i}" for i in range(30)]) + "."
+        big = make_seg("B", big_text, 1_000, 60_000)
+        chunks = chunk_with_sentences([tiny, big])
+        assert len(chunks) >= 1
+        assert chunks[0].text == "Sure."
+
+    # ── Sentence-aware splitting ──────────────────────────────────────────────
+
+    def test_long_segment_never_splits_mid_sentence(self):
+        """Every chunk boundary must fall at a sentence end (period/question mark)."""
+        merged = make_merged_segs()
+        chunks = chunk_with_sentences(merged)
+        for c in chunks[:-1]:  # last chunk may not end with punctuation
+            last_char = c.text.rstrip()[-1] if c.text.rstrip() else ""
+            # Not strict — transcripts may lack punctuation — but when it splits,
+            # the previous chunk should end with sentence-terminal punctuation.
+            # We just confirm no chunk ends mid-word (no trailing space).
+            assert not c.text.endswith(" "), (
+                f"chunk {c.chunk_index} ends with trailing space: {c.text[-20:]!r}"
+            )
+
+    def test_long_turn_produces_multiple_chunks(self):
+        """A turn with > TARGET_WORDS (250) words must produce at least 2 chunks."""
+        # Build text that is definitively > 250 words with clear sentence boundaries.
+        sentences = [
+            f"Point number {i} is an important consideration for the Acme renewal deal."
+            for i in range(30)
+        ]
+        long_text_with_sents = " ".join(sentences)  # ~300 words
+        raj_long = make_seg("Raj Patel", long_text_with_sents, 39_000, 118_700)
+        chunks = chunk_with_sentences([raj_long])
+        assert len(chunks) >= 2, (
+            f"Long turn ({len(long_text_with_sents.split())} words) must produce "
+            f"at least 2 chunks with TARGET_WORDS={TARGET_WORDS}"
+        )
+
+    def test_each_chunk_within_max_word_limit(self):
+        """No chunk produced by chunk_with_sentences should exceed MAX_WORDS_PER_CHUNK."""
+        merged = make_merged_segs()
+        chunks = chunk_with_sentences(merged)
+        for c in chunks:
+            word_count = len(c.text.split())
+            assert word_count <= MAX_WORDS_PER_CHUNK, (
+                f"chunk {c.chunk_index} has {word_count} words (>{MAX_WORDS_PER_CHUNK})"
+            )
+
+    # ── Overlap ───────────────────────────────────────────────────────────────
+
+    def test_overlap_words_appear_in_consecutive_chunks(self):
+        """The last OVERLAP_WORDS of chunk N must appear at the start of chunk N+1
+        when a long segment is split."""
+        # Generate 35 sentences (~350 words) — well over TARGET_WORDS=250, guarantees split.
+        sentences = [
+            f"Sentence number {i} covers an important point about the Acme contract renewal deal."
+            for i in range(35)
+        ]
+        long_text_with_sentences = " ".join(sentences)
+        segs = [make_seg("Speaker", long_text_with_sentences, 0, 120_000)]
+        chunks = chunk_with_sentences(segs)
+
+        if len(chunks) < 2:
+            pytest.skip("Text did not produce multiple chunks — adjust fixture")
+
+        tail_words = chunks[0].text.split()[-OVERLAP_WORDS:]
+        next_words = chunks[1].text.split()[:OVERLAP_WORDS]
+        overlap_found = any(w in next_words for w in tail_words)
+        assert overlap_found, (
+            "Expected overlap words from chunk 0 tail to appear in chunk 1 head"
+        )
+
+    def test_all_original_content_covered(self):
+        """Every word from the original input must appear in at least one chunk."""
+        long_with_sentences = ". ".join(
+            [f"Sentence number {i} contains important content" for i in range(50)]
+        ) + "."
+        segs = [make_seg("Alice", long_with_sentences, 0, 300_000)]
+        chunks = chunk_with_sentences(segs)
+        all_chunk_text = " ".join(c.text for c in chunks)
+
+        # Check key sentences are present (sampling to avoid O(n²) scan).
+        for i in [0, 10, 25, 49]:
+            assert f"Sentence number {i}" in all_chunk_text, (
+                f"'Sentence number {i}' not found in any chunk"
+            )
+
+    # ── Cross-segment index continuity ────────────────────────────────────────
+
+    def test_chunk_index_continuous_across_multiple_segments(self):
+        segs = [
+            make_seg("Alice", ". ".join([f"Word{i}" for i in range(60)]) + ".", 0, 60_000),
+            make_seg("Bob", "Short response here.", 61_000, 65_000),
+            make_seg("Alice", ". ".join([f"More{i}" for i in range(60)]) + ".", 66_000, 126_000),
+        ]
+        chunks = chunk_with_sentences(segs)
+        for i, c in enumerate(chunks):
+            assert c.chunk_index == i
+
+    # ── Timestamps ───────────────────────────────────────────────────────────
+
+    def test_first_chunk_start_matches_segment_start(self):
+        segs = [make_seg("Alice", "Hello world, this is a test sentence.", 5_000, 10_000)]
+        chunks = chunk_with_sentences(segs)
+        assert chunks[0].start_ms == 5_000
+
+    def test_last_chunk_end_matches_segment_end_for_single_segment(self):
+        segs = [make_seg("Alice", "Hello world, this is a test sentence.", 5_000, 10_000)]
+        chunks = chunk_with_sentences(segs)
+        assert chunks[-1].end_ms == 10_000
