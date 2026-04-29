@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-_lock = threading.Lock()
+_lock = threading.RLock()
 
 # ── Module-level singleton slots ──────────────────────────────────────────────
 

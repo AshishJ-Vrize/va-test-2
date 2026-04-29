@@ -79,12 +79,9 @@ class Meeting(Base):
         server_default=text("gen_random_uuid()"),
     )
     meeting_graph_id: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
-    organizer_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("users.id", ondelete="RESTRICT"),
-        nullable=False,
-        index=True,
-    )
+    organizer_graph_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    organizer_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    organizer_email: Mapped[Optional[str]] = mapped_column(String(320), nullable=True)
     meeting_subject: Mapped[str] = mapped_column(String(500), nullable=False)
     meeting_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     meeting_end_date: Mapped[Optional[datetime]] = mapped_column(
@@ -108,7 +105,7 @@ class Meeting(Base):
 
 
 class MeetingParticipant(Base):
-    """Composite PK on (meeting_id, user_id) — one row per user per meeting, enforced at DB level."""
+    """Composite PK on (meeting_id, participant_graph_id) — one row per participant per meeting."""
 
     __tablename__ = "meeting_participants"
     __table_args__ = (
@@ -123,11 +120,9 @@ class MeetingParticipant(Base):
         ForeignKey("meetings.id", ondelete="CASCADE"),
         primary_key=True,
     )
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("users.id", ondelete="CASCADE"),
-        primary_key=True,
-    )
+    participant_graph_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    participant_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    participant_email: Mapped[Optional[str]] = mapped_column(String(320), nullable=True)
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     granted_by: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True),

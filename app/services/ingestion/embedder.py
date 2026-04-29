@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from openai import AsyncAzureOpenAI, RateLimitError
+from openai import AsyncAzureOpenAI, APIConnectionError, APITimeoutError, RateLimitError
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from app.config.settings import get_settings
@@ -65,7 +65,7 @@ async def embed_batch(texts: list[str]) -> list[list[float]]:
 
 
 @retry(
-    retry=retry_if_exception_type(RateLimitError),
+    retry=retry_if_exception_type((RateLimitError, APIConnectionError, APITimeoutError)),
     wait=wait_exponential(multiplier=1, min=2, max=60),
     stop=stop_after_attempt(5),
     reraise=True,

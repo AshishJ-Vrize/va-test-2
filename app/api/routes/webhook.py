@@ -1,6 +1,6 @@
 # Webhook route handlers — Graph subscription management + notification ingestion
 # Owner: Graph + Routes team (route shell); webhook team owns services/graph/webhook.py
-# Depends on: app/api/deps.py — require_admin (DELIVERED)
+# Depends on: app/api/deps.py — get_current_user (DELIVERED)
 #             app/db/central/session.py — get_central_db (DELIVERED)
 #             app/core/security.py — CurrentUser (DELIVERED)
 # See docs/webhook_dependencies.md for full dependency tracking.
@@ -17,7 +17,7 @@ from app.core.security import CurrentUser
 from app.services.graph.exceptions import GraphClientError, TokenExpiredError
 from app.services.graph import webhook as webhook_service
 from app.db.central.session import get_central_db
-from app.api.deps import require_admin
+from app.api.deps import get_current_user
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -98,7 +98,7 @@ async def receive_call_records(
     summary="Register a callRecords webhook for the authenticated admin's tenant",
 )
 async def register_webhook(
-    current_user: CurrentUser = Depends(require_admin),
+    current_user: CurrentUser = Depends(get_current_user),
 ):
     """
     Creates a Graph callRecords subscription for the calling admin's tenant.
@@ -138,7 +138,7 @@ async def register_webhook(
 )
 async def renew_webhook(
     subscription_id: str,
-    current_user: CurrentUser = Depends(require_admin),
+    current_user: CurrentUser = Depends(get_current_user),
 ):
     """
     Extends a Graph subscription expiry by 23 hours.
@@ -175,7 +175,7 @@ async def renew_webhook(
 )
 async def delete_webhook(
     subscription_id: str,
-    current_user: CurrentUser = Depends(require_admin),
+    current_user: CurrentUser = Depends(get_current_user),
 ):
     """
     Deletes a Graph subscription for the calling admin's tenant.

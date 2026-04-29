@@ -46,8 +46,19 @@ async def _upsert_user(
     name_claim: str | None = claims.get("name")
     display_name = name_claim or (email.split("@")[0] if email else graph_id)
 
-    result = await session.execute(select(User).where(User.graph_id == graph_id))
-    user = result.scalar_one_or_none()
+    try:
+        result = await session.execute(select(User).where(User.graph_id == graph_id))
+        user = result.scalar_one_or_none()
+    except Exception as exc:
+        log.exception(
+            "auth: DB error during user lookup | oid=%s | org=%s | error=%s",
+            graph_id, tenant_info.org_name, exc,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Authentication service temporarily unavailable. Please try again.",
+        ) from exc
+
     now = datetime.now(timezone.utc)
 
     if user is None:
@@ -64,7 +75,17 @@ async def _upsert_user(
             last_login_at=now,
         )
         session.add(user)
-        await session.flush()
+        try:
+            await session.flush()
+        except Exception as exc:
+            log.exception(
+                "auth: DB error creating user record | oid=%s | org=%s | error=%s",
+                graph_id, tenant_info.org_name, exc,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Authentication service temporarily unavailable. Please try again.",
+            ) from exc
     else:
         if not user.is_active:
             log.warning(
@@ -192,14 +213,26 @@ def require_feature(feature_key: str) -> Callable:
     ) -> CurrentUser:
         user_id_str = str(current_user.id)
 
-        result = await tenant_db.execute(
-            select(FeaturePermission).where(
-                FeaturePermission.target_type == "user",
-                FeaturePermission.target_id == user_id_str,
-                FeaturePermission.feature_key == feature_key,
+        try:
+            result = await tenant_db.execute(
+                select(FeaturePermission).where(
+                    FeaturePermission.target_type == "user",
+                    FeaturePermission.target_id == user_id_str,
+                    FeaturePermission.feature_key == feature_key,
+                )
             )
-        )
-        user_perm = result.scalar_one_or_none()
+            user_perm = result.scalar_one_or_none()
+        except Exception as exc:
+            log.exception(
+                "feature gate: DB error on user-level permission check | "
+                "user_id=%s | feature=%s | org=%s | error=%s",
+                user_id_str, feature_key, current_user.tenant.org_name, exc,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Feature access check temporarily unavailable. Please try again.",
+            ) from exc
+
         if user_perm is not None:
             if user_perm.permission == "deny":
                 raise HTTPException(
@@ -208,14 +241,27 @@ def require_feature(feature_key: str) -> Callable:
                 )
             return current_user
 
-        result = await tenant_db.execute(
-            select(FeaturePermission).where(
-                FeaturePermission.target_type == "role",
-                FeaturePermission.target_id == current_user.system_role,
-                FeaturePermission.feature_key == feature_key,
+        try:
+            result = await tenant_db.execute(
+                select(FeaturePermission).where(
+                    FeaturePermission.target_type == "role",
+                    FeaturePermission.target_id == current_user.system_role,
+                    FeaturePermission.feature_key == feature_key,
+                )
             )
-        )
-        role_perm = result.scalar_one_or_none()
+            role_perm = result.scalar_one_or_none()
+        except Exception as exc:
+            log.exception(
+                "feature gate: DB error on role-level permission check | "
+                "user_id=%s | role=%s | feature=%s | org=%s | error=%s",
+                user_id_str, current_user.system_role, feature_key,
+                current_user.tenant.org_name, exc,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Feature access check temporarily unavailable. Please try again.",
+            ) from exc
+
         if role_perm is not None:
             if role_perm.permission == "deny":
                 raise HTTPException(

@@ -61,6 +61,9 @@ def ingest_meeting_task(
         10 × 5 min = up to 50 min of retrying — covers the processing window.
         Individual steps override countdown when a longer delay makes sense.
     """
+    import sys
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(_ingest_async(self, call_chain_id, org_name, ms_tenant_id))
 
 
@@ -81,11 +84,19 @@ async def _ingest_async(
             "org=%s | call_chain_id=%s",
             org_name, call_chain_id,
         )
-        async with central_session() as db:
-            result = await db.execute(
-                select(Tenant).where(Tenant.org_name == org_name)
+        try:
+            async with central_session() as db:
+                result = await db.execute(
+                    select(Tenant).where(Tenant.org_name == org_name)
+                )
+                tenant = result.scalars().first()
+        except Exception as exc:
+            logger.exception(
+                "ingest_meeting_task: central DB error during tenant lookup — retrying | "
+                "org=%s | call_chain_id=%s | error=%s",
+                org_name, call_chain_id, exc,
             )
-            tenant = result.scalars().first()
+            raise
 
         if tenant is None:
             logger.error(
@@ -126,11 +137,15 @@ async def _ingest_async(
     client = GraphClient(access_token)
 
     # ── Step 3: fetch callRecord from Graph ───────────────────────────────────
-    # callRecord contains joinWebUrl (needed to look up the online meeting)
-    # and organizer.user.id (needed as user_id for app-only Graph calls).
+    # participants is a regular property on callRecord (not a navigation property)
+    # so it is returned in the default response — no $expand needed.
+    # All participant graph IDs are collected here to run the platform-user gate
+    # (Step 3.5) before any user-scoped Graph calls.
 
     try:
-        call_record = await client.get(f"/communications/callRecords/{call_chain_id}")
+        call_record = await client.get(
+            f"/communications/callRecords/{call_chain_id}",
+        )
     except TokenExpiredError as exc:
         logger.error(
             "ingest_meeting_task: app token rejected fetching callRecord | "
@@ -147,22 +162,86 @@ async def _ingest_async(
         raise task.retry(exc=exc, countdown=300)
 
     join_web_url: str | None = call_record.get("joinWebUrl")
-    organizer_user_id: str | None = (
+    organizer_graph_id: str | None = (
         call_record.get("organizer", {}).get("user", {}).get("id")
     )
 
-    if not join_web_url or not organizer_user_id:
+    if not join_web_url or not organizer_graph_id:
         logger.error(
             "ingest_meeting_task: callRecord missing joinWebUrl or organizer.user.id — aborting | "
-            "org=%s | call_chain_id=%s | joinWebUrl=%r | organizer_user_id=%r",
-            org_name, call_chain_id, join_web_url, organizer_user_id,
+            "org=%s | call_chain_id=%s | joinWebUrl=%r | organizer_graph_id=%r",
+            org_name, call_chain_id, join_web_url, organizer_graph_id,
         )
         return  # structural issue — retrying won't help
 
+    # Collect every participant graph ID present in the callRecord.
+    all_participant_graph_ids: set[str] = {organizer_graph_id}
+    for p in call_record.get("participants", []):
+        pid: str | None = p.get("identity", {}).get("user", {}).get("id")
+        if pid:
+            all_participant_graph_ids.add(pid)
+
     logger.info(
         "ingest_meeting_task: callRecord fetched | org=%s | call_chain_id=%s | "
-        "organizer_user_id=%s",
-        org_name, call_chain_id, organizer_user_id,
+        "organizer_graph_id=%s | participant_count=%d",
+        org_name, call_chain_id, organizer_graph_id, len(all_participant_graph_ids),
+    )
+
+    # ── Step 3.5: platform user gate ─────────────────────────────────────────
+    # At least one meeting participant must be a platform user (present in the
+    # tenant users table) for ingestion to proceed.
+    # This user's graph_id is used for all subsequent user-scoped Graph API
+    # calls (Steps 4a/4b/4c) — it must belong to a user in the customer's
+    # Azure AD tenant, which internal platform users always are.
+
+    db_manager = get_db_manager()
+    registry = get_tenant_registry()
+    cached_tenant = registry.get(ms_tenant_id)
+
+    if cached_tenant is None:
+        async with central_session() as central_db:
+            cached_tenant = await registry.refresh_one(ms_tenant_id, central_db)
+
+    if cached_tenant is None:
+        logger.error(
+            "ingest_meeting_task: tenant not found in registry after refresh — aborting | "
+            "org=%s | tenant=%s",
+            org_name, ms_tenant_id,
+        )
+        return
+
+    try:
+        async with db_manager.get_session(ms_tenant_id, cached_tenant) as tenant_db:
+            platform_user_result = await tenant_db.execute(
+                select(User)
+                .where(
+                    User.graph_id.in_(all_participant_graph_ids),
+                    User.is_active.is_(True),
+                )
+                .limit(1)
+            )
+            platform_user = platform_user_result.scalar_one_or_none()
+    except Exception as exc:
+        logger.exception(
+            "ingest_meeting_task: tenant DB error during platform user gate — retrying | "
+            "org=%s | tenant=%s | call_chain_id=%s | error=%s",
+            org_name, ms_tenant_id, call_chain_id, exc,
+        )
+        raise
+
+    if platform_user is None:
+        logger.info(
+            "ingest_meeting_task: no platform user found among meeting participants — skipping | "
+            "org=%s | call_chain_id=%s | participants_checked=%d",
+            org_name, call_chain_id, len(all_participant_graph_ids),
+        )
+        return
+
+    lookup_user_id: str = platform_user.graph_id
+    logger.info(
+        "ingest_meeting_task: platform user found — proceeding with ingestion | "
+        "org=%s | call_chain_id=%s | lookup_user_id=%s",
+        org_name, call_chain_id, lookup_user_id,
     )
 
     # ── Step 4: fetch transcript VTT from Graph ───────────────────────────────
@@ -175,7 +254,7 @@ async def _ingest_async(
     # Step 4a: resolve meeting_graph_id from joinWebUrl
     try:
         meeting = await client.get_meeting_by_join_url(
-            join_web_url, user_id=organizer_user_id
+            join_web_url, user_id=lookup_user_id
         )
     except MeetingNotFoundError as exc:
         logger.error(
@@ -201,9 +280,17 @@ async def _ingest_async(
 
     meeting_graph_id: str = meeting["id"]
 
+    logger.info(
+        "ingest_meeting_task: meeting identified | org=%s | call_chain_id=%s | "
+        "meeting_graph_id=%s | subject=%r | join_url=%s",
+        org_name, call_chain_id, meeting_graph_id,
+        meeting.get("subject") or "Untitled Meeting",
+        meeting.get("joinWebUrl", ""),
+    )
+
     # Step 4b: list transcripts — may be empty if Teams hasn't processed them yet
     try:
-        transcripts = await client.get_transcripts(meeting_graph_id, user_id=organizer_user_id)
+        transcripts = await client.get_transcripts(meeting_graph_id, user_id=lookup_user_id)
     except TokenExpiredError as exc:
         logger.error(
             "ingest_meeting_task: app token rejected fetching transcripts | "
@@ -235,7 +322,7 @@ async def _ingest_async(
     # Step 4c: download the raw VTT content
     try:
         vtt_content = await client.get_transcript_content(
-            meeting_graph_id, transcript_id, user_id=organizer_user_id
+            meeting_graph_id, transcript_id, user_id=lookup_user_id
         )
     except TokenExpiredError as exc:
         logger.error(
@@ -258,46 +345,66 @@ async def _ingest_async(
         org_name, meeting_graph_id, transcript_id, len(vtt_content),
     )
 
-    # ── Step 5: resolve cached_tenant + credit pricing ────────────────────────
-    # TenantRegistry is keyed by ms_tenant_id — in-memory, no DB call on hit.
-    # Refresh from central DB once if the entry is missing (cold Celery start).
+    # ── Step 5: credit pricing ────────────────────────────────────────────────
+    # cached_tenant already resolved in Step 3.5 (platform user gate).
 
-    registry = get_tenant_registry()
-    cached_tenant = registry.get(ms_tenant_id)
-
-    if cached_tenant is None:
+    try:
         async with central_session() as central_db:
-            cached_tenant = await registry.refresh_one(ms_tenant_id, central_db)
-
-    if cached_tenant is None:
-        logger.error(
-            "ingest_meeting_task: tenant not found in registry after refresh — aborting | "
-            "org=%s | tenant=%s",
-            org_name, ms_tenant_id,
+            pricing_result = await central_db.execute(
+                select(CreditPricing).where(CreditPricing.plan == cached_tenant.plan)
+            )
+            pricing = pricing_result.scalar_one_or_none()
+    except Exception as exc:
+        logger.exception(
+            "ingest_meeting_task: central DB error during credit pricing lookup — retrying | "
+            "org=%s | tenant=%s | plan=%s | error=%s",
+            org_name, ms_tenant_id, cached_tenant.plan, exc,
         )
-        return
-
-    async with central_session() as central_db:
-        pricing_result = await central_db.execute(
-            select(CreditPricing).where(CreditPricing.plan == cached_tenant.plan)
-        )
-        pricing = pricing_result.scalar_one_or_none()
+        raise
 
     credits_per_minute: int = pricing.credits_per_minute if pricing else 1
 
     # ── Step 6: upsert meeting + participants in tenant DB ────────────────────
-    # Resolve organizer display name from Graph — fall back to "Unknown Organizer"
-    # if the user profile call fails (non-fatal).
+    # All get_user_by_id calls are fired in parallel via asyncio.gather so the
+    # total wait is one round-trip regardless of participant count.
+    # return_exceptions=True means one failed lookup does not cancel the others.
+    # Falls back to UPN if a lookup fails. No user records created — platform-only.
 
     participants_raw = meeting.get("participants", {})
     organizer_raw = participants_raw.get("organizer", {})
-    organizer_upn: str | None = organizer_raw.get("upn")
+    organizer_upn: str = organizer_raw.get("upn") or ""
 
-    try:
-        organizer_profile = await client.get_user_by_id(organizer_upn or organizer_user_id)
-    except (TokenExpiredError, GraphClientError):
-        organizer_profile = None
+    attendees_raw = [
+        a for a in participants_raw.get("attendees", [])
+        if a.get("identity", {}).get("user", {}).get("id")
+    ]
+    attendee_graph_ids: list[str] = [
+        a["identity"]["user"]["id"] for a in attendees_raw
+    ]
+    attendee_upns: list[str] = [
+        a.get("upn") or "" for a in attendees_raw
+    ]
 
+    # Fire all profile lookups simultaneously
+    all_graph_ids = [organizer_graph_id] + attendee_graph_ids
+    raw_results = await asyncio.gather(
+        *[client.get_user_by_id(gid) for gid in all_graph_ids],
+        return_exceptions=True,
+    )
+    # Normalize: exceptions → None (fallback to UPN), log each failure
+    profiles = []
+    for gid, r in zip(all_graph_ids, raw_results):
+        if isinstance(r, dict):
+            profiles.append(r)
+        else:
+            logger.warning(
+                "ingest_meeting_task: get_user_by_id failed — falling back to UPN | "
+                "org=%s | graph_id=%s | error=%s",
+                org_name, gid, r,
+            )
+            profiles.append(None)
+
+    organizer_profile = profiles[0]
     organizer_display_name: str = (
         (organizer_profile or {}).get("displayName")
         or organizer_upn
@@ -316,21 +423,14 @@ async def _ingest_async(
     duration_minutes = _compute_duration(start_dt, end_dt)
     join_url_from_graph: str = meeting.get("joinWebUrl") or join_web_url
 
-    db_manager = get_db_manager()
     async with db_manager.get_session(ms_tenant_id, cached_tenant) as tenant_db:
-
-        organizer_user = await _upsert_user(
-            tenant_db,
-            graph_id=organizer_user_id,
-            email=organizer_email,
-            display_name=organizer_display_name,
-        )
-        await tenant_db.flush()
 
         meeting_row = await _upsert_meeting(
             tenant_db,
             meeting_graph_id=meeting_graph_id,
-            organizer_id=organizer_user.id,
+            organizer_graph_id=organizer_graph_id,
+            organizer_name=organizer_display_name,
+            organizer_email=organizer_email,
             subject=subject,
             meeting_date=start_dt or datetime.now(timezone.utc),
             meeting_end_date=end_dt,
@@ -340,25 +440,33 @@ async def _ingest_async(
         await tenant_db.flush()
 
         await _upsert_participant(
-            tenant_db, meeting_id=meeting_row.id, user_id=organizer_user.id, role="organizer"
+            tenant_db,
+            meeting_id=meeting_row.id,
+            participant_graph_id=organizer_graph_id,
+            participant_name=organizer_display_name,
+            participant_email=organizer_email,
+            role="organizer",
         )
 
-        for attendee_raw in participants_raw.get("attendees", []):
-            attendee_graph_id: str | None = (
-                attendee_raw.get("identity", {}).get("user", {}).get("id")
+        for i, attendee_graph_id in enumerate(attendee_graph_ids):
+            attendee_profile = profiles[i + 1]
+            upn = attendee_upns[i]
+            attendee_name: str | None = (
+                (attendee_profile or {}).get("displayName") or upn or None
             )
-            if not attendee_graph_id:
-                continue
-            attendee_upn: str = attendee_raw.get("upn") or ""
-            attendee_user = await _upsert_user(
-                tenant_db,
-                graph_id=attendee_graph_id,
-                email=attendee_upn,
-                display_name=attendee_upn or "Unknown Attendee",
+            attendee_email: str | None = (
+                (attendee_profile or {}).get("mail")
+                or (attendee_profile or {}).get("userPrincipalName")
+                or upn
+                or None
             )
-            await tenant_db.flush()
             await _upsert_participant(
-                tenant_db, meeting_id=meeting_row.id, user_id=attendee_user.id, role="attendee"
+                tenant_db,
+                meeting_id=meeting_row.id,
+                participant_graph_id=attendee_graph_id,
+                participant_name=attendee_name,
+                participant_email=attendee_email,
+                role="attendee",
             )
 
         await tenant_db.flush()
@@ -412,37 +520,14 @@ def _compute_duration(start: datetime | None, end: datetime | None) -> int | Non
     return max(1, ceil((end - start).total_seconds() / 60))
 
 
-async def _upsert_user(
-    db: AsyncSession,
-    *,
-    graph_id: str,
-    email: str,
-    display_name: str,
-) -> User:
-    result = await db.execute(select(User).where(User.graph_id == graph_id))
-    user = result.scalar_one_or_none()
-    if user is None:
-        user = User(
-            graph_id=graph_id,
-            email=email or graph_id,
-            display_name=display_name or "Unknown",
-            system_role="user",
-            is_active=True,
-        )
-        db.add(user)
-    else:
-        if email:
-            user.email = email
-        if display_name:
-            user.display_name = display_name
-    return user
-
 
 async def _upsert_meeting(
     db: AsyncSession,
     *,
     meeting_graph_id: str,
-    organizer_id: UUID,
+    organizer_graph_id: str,
+    organizer_name: str | None,
+    organizer_email: str | None,
     subject: str,
     meeting_date: datetime,
     meeting_end_date: datetime | None,
@@ -456,17 +541,22 @@ async def _upsert_meeting(
     if meeting is None:
         meeting = Meeting(
             meeting_graph_id=meeting_graph_id,
-            organizer_id=organizer_id,
+            organizer_graph_id=organizer_graph_id,
+            organizer_name=organizer_name,
+            organizer_email=organizer_email,
             meeting_subject=subject,
             meeting_date=meeting_date,
             meeting_end_date=meeting_end_date,
             duration_minutes=duration_minutes,
             join_url=join_url,
-            ingestion_source="webhook",  # distinguishes from manual /ingest route
+            ingestion_source="webhook",
             status="pending",
         )
         db.add(meeting)
     else:
+        meeting.organizer_graph_id = organizer_graph_id
+        meeting.organizer_name = organizer_name
+        meeting.organizer_email = organizer_email
         meeting.meeting_subject = subject
         meeting.meeting_date = meeting_date
         meeting.meeting_end_date = meeting_end_date
@@ -480,18 +570,22 @@ async def _upsert_participant(
     db: AsyncSession,
     *,
     meeting_id: UUID,
-    user_id: UUID,
+    participant_graph_id: str,
+    participant_name: str | None,
+    participant_email: str | None,
     role: str,
 ) -> None:
     result = await db.execute(
         select(MeetingParticipant).where(
             MeetingParticipant.meeting_id == meeting_id,
-            MeetingParticipant.user_id == user_id,
+            MeetingParticipant.participant_graph_id == participant_graph_id,
         )
     )
     if result.scalar_one_or_none() is None:
         db.add(MeetingParticipant(
             meeting_id=meeting_id,
-            user_id=user_id,
+            participant_graph_id=participant_graph_id,
+            participant_name=participant_name,
+            participant_email=participant_email,
             role=role,
         ))
