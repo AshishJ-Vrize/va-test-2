@@ -62,13 +62,14 @@ def _make_db(meeting=None, existing_transcript=None):
     """
     Return a (db, meeting) pair where db is a mock AsyncSession.
 
-    db.get(Meeting, id)            → meeting
-    db.execute(select(...))        → result with scalar_one_or_none() = existing_transcript
-    db.execute(delete(...))        → no-op result
-    db.flush()                     → coroutine that returns None
+    db.get(Meeting, id)               → meeting  (awaitable)
+    db.execute(select(Transcript)...) → result with scalar_one_or_none()
+    db.flush()                        → awaitable no-op
+    db.add(...)                       → sync no-op (SQLAlchemy add is sync)
     """
     db = MagicMock()
     meeting = meeting or _make_meeting()
+
     db.get = AsyncMock(return_value=meeting)
     db.flush = AsyncMock()
 
@@ -79,6 +80,14 @@ def _make_db(meeting=None, existing_transcript=None):
     return db, meeting
 
 
+async def _fake_contextualize(meeting_subject, meeting_date, speakers, chunks):
+    return [f"ctx_{i}" for i in range(len(chunks))]
+
+
+async def _fake_embed_batch(texts):
+    return [[0.1] * 1536 for _ in texts]
+
+
 # ── Pipeline — happy path ─────────────────────────────────────────────────────
 
 class TestRunIngestionPipelineHappyPath:
@@ -86,12 +95,11 @@ class TestRunIngestionPipelineHappyPath:
     async def _run(self, vtt=SIMPLE_VTT, duration_minutes=5, credits_per_minute=2):
         meeting = _make_meeting(duration_minutes=duration_minutes)
         db, _ = _make_db(meeting=meeting, existing_transcript=None)
-        fake_emb = _fake_embedding()
 
-        with patch(
-            "app.services.ingestion.pipeline.embed_batch",
-            new=AsyncMock(return_value=[fake_emb, fake_emb]),
-        ):
+        with patch("app.services.ingestion.pipeline.contextualize_chunks", _fake_contextualize), \
+             patch("app.services.ingestion.pipeline.embed_batch", _fake_embed_batch), \
+             patch("app.services.ingestion.pipeline._upsert_meeting_summary", AsyncMock()), \
+             patch("app.services.insights.generator.generate_insights_for_meeting", AsyncMock(return_value=True)):
             await run_ingestion_pipeline(
                 meeting_id=meeting.id,
                 vtt_content=vtt,
@@ -101,30 +109,36 @@ class TestRunIngestionPipelineHappyPath:
 
         return meeting, db
 
+    @pytest.mark.asyncio
     async def test_meeting_status_set_to_ready(self):
         meeting, _ = await self._run()
         assert meeting.status == "ready"
 
+    @pytest.mark.asyncio
     async def test_db_add_called_for_transcript(self):
         _, db = await self._run()
         types_added = [type(c[0][0]).__name__ for c in db.add.call_args_list]
         assert "Transcript" in types_added
 
+    @pytest.mark.asyncio
     async def test_db_add_called_for_chunks(self):
         _, db = await self._run()
         types_added = [type(c[0][0]).__name__ for c in db.add.call_args_list]
         assert "Chunk" in types_added
 
+    @pytest.mark.asyncio
     async def test_db_add_called_for_speaker_analytics(self):
         _, db = await self._run()
         types_added = [type(c[0][0]).__name__ for c in db.add.call_args_list]
         assert "SpeakerAnalytic" in types_added
 
+    @pytest.mark.asyncio
     async def test_db_add_called_for_credit_usage(self):
         _, db = await self._run()
         types_added = [type(c[0][0]).__name__ for c in db.add.call_args_list]
         assert "CreditUsage" in types_added
 
+    @pytest.mark.asyncio
     async def test_credit_usage_operation_is_ingestion(self):
         _, db = await self._run()
         credit_rows = [
@@ -134,6 +148,7 @@ class TestRunIngestionPipelineHappyPath:
         assert len(credit_rows) == 1
         assert credit_rows[0].operation == "ingestion"
 
+    @pytest.mark.asyncio
     async def test_credits_consumed_uses_duration_and_rate(self):
         _, db = await self._run(duration_minutes=10, credits_per_minute=2)
         credit_row = next(
@@ -142,15 +157,15 @@ class TestRunIngestionPipelineHappyPath:
         )
         assert credit_row.credits_consumed == 20  # 10 min * 2 credits
 
+    @pytest.mark.asyncio
     async def test_duration_minutes_none_falls_back_to_1(self):
         meeting = _make_meeting(duration_minutes=None)
         db, _ = _make_db(meeting=meeting, existing_transcript=None)
-        fake_emb = _fake_embedding()
 
-        with patch(
-            "app.services.ingestion.pipeline.embed_batch",
-            new=AsyncMock(return_value=[fake_emb, fake_emb]),
-        ):
+        with patch("app.services.ingestion.pipeline.contextualize_chunks", _fake_contextualize), \
+             patch("app.services.ingestion.pipeline.embed_batch", _fake_embed_batch), \
+             patch("app.services.ingestion.pipeline._upsert_meeting_summary", AsyncMock()), \
+             patch("app.services.insights.generator.generate_insights_for_meeting", AsyncMock(return_value=True)):
             await run_ingestion_pipeline(
                 meeting_id=meeting.id,
                 vtt_content=SIMPLE_VTT,
@@ -164,10 +179,12 @@ class TestRunIngestionPipelineHappyPath:
         )
         assert credit_row.credits_consumed == 3  # 1 minute fallback * 3
 
+    @pytest.mark.asyncio
     async def test_db_flush_called_multiple_times(self):
         _, db = await self._run()
         assert db.flush.call_count >= 4
 
+    @pytest.mark.asyncio
     async def test_db_commit_never_called(self):
         """Commit is the caller's responsibility — pipeline must never call it."""
         _, db = await self._run()
@@ -178,6 +195,7 @@ class TestRunIngestionPipelineHappyPath:
 
 class TestRunIngestionPipelineMeetingNotFound:
 
+    @pytest.mark.asyncio
     async def test_raises_value_error(self):
         db = MagicMock()
         db.get = AsyncMock(return_value=None)
@@ -194,6 +212,7 @@ class TestRunIngestionPipelineMeetingNotFound:
 
 class TestRunIngestionPipelineEmptyVtt:
 
+    @pytest.mark.asyncio
     async def test_empty_vtt_marks_meeting_failed(self):
         meeting = _make_meeting()
         db, _ = _make_db(meeting=meeting)
@@ -211,13 +230,13 @@ class TestRunIngestionPipelineEmptyVtt:
 
 class TestRunIngestionPipelineEmbedFailure:
 
+    @pytest.mark.asyncio
     async def test_embed_failure_marks_meeting_failed(self):
         meeting = _make_meeting()
         db, _ = _make_db(meeting=meeting)
-        with patch(
-            "app.services.ingestion.pipeline.embed_batch",
-            new=AsyncMock(side_effect=RuntimeError("Azure OpenAI unreachable")),
-        ):
+        with patch("app.services.ingestion.pipeline.contextualize_chunks", _fake_contextualize), \
+             patch("app.services.ingestion.pipeline.embed_batch",
+                   AsyncMock(side_effect=RuntimeError("Azure OpenAI unreachable"))):
             with pytest.raises(RuntimeError):
                 await run_ingestion_pipeline(
                     meeting_id=meeting.id,
@@ -227,13 +246,13 @@ class TestRunIngestionPipelineEmbedFailure:
                 )
         assert meeting.status == "failed"
 
+    @pytest.mark.asyncio
     async def test_embed_failure_reraises_exception(self):
         meeting = _make_meeting()
         db, _ = _make_db(meeting=meeting)
-        with patch(
-            "app.services.ingestion.pipeline.embed_batch",
-            new=AsyncMock(side_effect=ValueError("bad embedding")),
-        ):
+        with patch("app.services.ingestion.pipeline.contextualize_chunks", _fake_contextualize), \
+             patch("app.services.ingestion.pipeline.embed_batch",
+                   AsyncMock(side_effect=ValueError("bad embedding"))):
             with pytest.raises(ValueError, match="bad embedding"):
                 await run_ingestion_pipeline(
                     meeting_id=meeting.id,
@@ -247,16 +266,16 @@ class TestRunIngestionPipelineEmbedFailure:
 
 class TestRunIngestionPipelineReIngestion:
 
+    @pytest.mark.asyncio
     async def test_existing_transcript_is_updated_not_duplicated(self):
         meeting = _make_meeting()
         existing = _make_transcript(meeting_id=meeting.id)
         db, _ = _make_db(meeting=meeting, existing_transcript=existing)
-        fake_emb = _fake_embedding()
 
-        with patch(
-            "app.services.ingestion.pipeline.embed_batch",
-            new=AsyncMock(return_value=[fake_emb, fake_emb]),
-        ):
+        with patch("app.services.ingestion.pipeline.contextualize_chunks", _fake_contextualize), \
+             patch("app.services.ingestion.pipeline.embed_batch", _fake_embed_batch), \
+             patch("app.services.ingestion.pipeline._upsert_meeting_summary", AsyncMock()), \
+             patch("app.services.insights.generator.generate_insights_for_meeting", AsyncMock(return_value=True)):
             await run_ingestion_pipeline(
                 meeting_id=meeting.id,
                 vtt_content=SIMPLE_VTT,
@@ -288,6 +307,7 @@ class TestEmbedBatch:
         ]
         return SimpleNamespace(data=data)
 
+    @pytest.mark.asyncio
     async def test_returns_one_vector_per_text(self):
         texts = ["hello", "world", "test"]
         with patch("app.services.ingestion.embedder._get_client") as mock_client:
@@ -297,6 +317,7 @@ class TestEmbedBatch:
             result = await embed_batch(texts)
         assert len(result) == 3
 
+    @pytest.mark.asyncio
     async def test_each_vector_has_1536_dims(self):
         texts = ["hello", "world"]
         with patch("app.services.ingestion.embedder._get_client") as mock_client:
@@ -307,9 +328,11 @@ class TestEmbedBatch:
         for vec in result:
             assert len(vec) == 1536
 
+    @pytest.mark.asyncio
     async def test_empty_input_returns_empty_list(self):
         assert await embed_batch([]) == []
 
+    @pytest.mark.asyncio
     async def test_wrong_dimension_raises_value_error(self):
         texts = ["hello"]
         bad = SimpleNamespace(data=[SimpleNamespace(index=0, embedding=[0.1] * 512)])
@@ -318,6 +341,7 @@ class TestEmbedBatch:
             with pytest.raises(ValueError, match="1536"):
                 await embed_batch(texts)
 
+    @pytest.mark.asyncio
     async def test_17_texts_makes_two_api_calls(self):
         """16-per-batch limit: 17 texts → 2 calls (16 + 1)."""
         texts = [f"t{i}" for i in range(17)]
@@ -329,12 +353,13 @@ class TestEmbedBatch:
             return self._fake_response(input)
 
         with patch("app.services.ingestion.embedder._get_client") as mock_client:
-            mock_client.return_value.embeddings.create = fake_create
+            mock_client.return_value.embeddings.create.side_effect = fake_create
             result = await embed_batch(texts)
 
         assert call_count == 2
         assert len(result) == 17
 
+    @pytest.mark.asyncio
     async def test_order_preserved_across_batches(self):
         texts = [f"t{i}" for i in range(20)]
 
@@ -345,7 +370,7 @@ class TestEmbedBatch:
             ])
 
         with patch("app.services.ingestion.embedder._get_client") as mock_client:
-            mock_client.return_value.embeddings.create = fake_create
+            mock_client.return_value.embeddings.create.side_effect = fake_create
             result = await embed_batch(texts)
 
         assert len(result) == 20
@@ -355,6 +380,7 @@ class TestEmbedBatch:
 
 class TestEmbedSingle:
 
+    @pytest.mark.asyncio
     async def test_returns_single_1536_dim_vector(self):
         fake = SimpleNamespace(data=[SimpleNamespace(index=0, embedding=[0.1] * 1536)])
         with patch("app.services.ingestion.embedder._get_client") as mock_client:
@@ -362,10 +388,11 @@ class TestEmbedSingle:
             result = await embed_single("hello world")
         assert len(result) == 1536
 
+    @pytest.mark.asyncio
     async def test_delegates_to_embed_batch(self):
         with patch(
             "app.services.ingestion.embedder.embed_batch",
-            new=AsyncMock(return_value=[[0.1] * 1536]),
+            AsyncMock(return_value=[[0.1] * 1536]),
         ) as mock_batch:
             await embed_single("test")
         mock_batch.assert_called_once_with(["test"])
@@ -375,6 +402,7 @@ class TestEmbedSingle:
 
 class TestEmbedBatchRetry:
 
+    @pytest.mark.asyncio
     async def test_rate_limit_retries_and_succeeds(self):
         from openai import RateLimitError
 
@@ -393,8 +421,9 @@ class TestEmbedBatchRetry:
             return good
 
         with patch("app.services.ingestion.embedder._get_client") as mock_client:
-            mock_client.return_value.embeddings.create = flaky
-            with patch("tenacity.nap.time.sleep"):
+            mock_client.return_value.embeddings.create.side_effect = flaky
+            # async retry uses asyncio.sleep, not time.sleep
+            with patch("asyncio.sleep"):
                 result = await embed_batch(["hello"])
 
         assert call_count == 2

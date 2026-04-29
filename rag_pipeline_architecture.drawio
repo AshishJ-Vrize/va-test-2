@@ -1,0 +1,259 @@
+<mxfile host="app.diagrams.net" modified="2026-04-29" agent="Claude" version="21.0.0">
+  <diagram name="RAG Pipeline Architecture" id="rag-pipeline">
+    <mxGraphModel dx="1422" dy="762" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- Title -->
+        <mxCell id="title" value="RAG Pipeline Architecture — Video Analytics (feature/rag-implementation)" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=16;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="300" y="15" width="800" height="40" as="geometry" />
+        </mxCell>
+
+        <!-- ═══════════════════════════════════════════════════ -->
+        <!-- INGESTION PIPELINE SWIMLANE                        -->
+        <!-- ═══════════════════════════════════════════════════ -->
+        <mxCell id="ing-lane" value="INGESTION PIPELINE (run_ingestion_pipeline)" style="swimlane;startSize=30;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="20" y="70" width="360" height="1000" as="geometry" />
+        </mxCell>
+
+        <mxCell id="vtt-upload" value="VTT File Upload" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;fontStyle=1;" vertex="1" parent="ing-lane">
+          <mxGeometry x="80" y="50" width="200" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="vtt-parser" value="VTT Parser&#xa;parse_vtt()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="ing-lane">
+          <mxGeometry x="80" y="120" width="200" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="merge-turns" value="Merge Speaker Turns&#xa;merge_speaker_turns()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="ing-lane">
+          <mxGeometry x="80" y="190" width="200" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="chunker" value="Sentence-aware Chunker&#xa;chunk_with_sentences()&#xa;max 250 words · 40-word overlap" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="ing-lane">
+          <mxGeometry x="80" y="260" width="200" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="free-layer" value="Free-layer Contextualizer&#xa;build_contextual_text()&#xa;Meeting metadata + Speaker label" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="ing-lane">
+          <mxGeometry x="80" y="345" width="200" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="llm-context" value="LLM Contextualizer&#xa;contextualize_chunks()&#xa;gpt-4o-mini · 1 batched call/meeting" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="ing-lane">
+          <mxGeometry x="80" y="430" width="200" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="embedder-ing" value="Chunk Embedder&#xa;embed_batch()&#xa;text-embedding-3-small · 1536-dim" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="ing-lane">
+          <mxGeometry x="80" y="515" width="200" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="save-chunks" value="Persist Chunks&#xa;text · speaker · start_ms · end_ms&#xa;embedding · contextual_text" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="ing-lane">
+          <mxGeometry x="80" y="600" width="200" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="speaker-analytics" value="Speaker Analytics&#xa;talk_time · word_count per speaker" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="ing-lane">
+          <mxGeometry x="80" y="680" width="200" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="summary-gen" value="MOM Summary Generator&#xa;_upsert_meeting_summary()&#xa;gpt-4o · Structured MOM format" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="ing-lane">
+          <mxGeometry x="80" y="755" width="200" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="insights-gen" value="Structured Insights Generator&#xa;generate_insights_for_meeting()&#xa;Action Items · Decisions · Follow-ups" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="ing-lane">
+          <mxGeometry x="80" y="840" width="200" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="ing-done" value="meeting.status = ready" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;fontStyle=1;" vertex="1" parent="ing-lane">
+          <mxGeometry x="80" y="925" width="200" height="40" as="geometry" />
+        </mxCell>
+
+        <!-- Ingestion arrows -->
+        <mxCell id="ie1" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="vtt-upload" target="vtt-parser" parent="ing-lane"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ie2" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="vtt-parser" target="merge-turns" parent="ing-lane"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ie3" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="merge-turns" target="chunker" parent="ing-lane"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ie4" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="chunker" target="free-layer" parent="ing-lane"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ie5" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="free-layer" target="llm-context" parent="ing-lane"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ie6" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="llm-context" target="embedder-ing" parent="ing-lane"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ie7" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="embedder-ing" target="save-chunks" parent="ing-lane"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ie8" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="save-chunks" target="speaker-analytics" parent="ing-lane"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ie9" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="speaker-analytics" target="summary-gen" parent="ing-lane"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ie10" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="summary-gen" target="insights-gen" parent="ing-lane"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ie11" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="insights-gen" target="ing-done" parent="ing-lane"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <!-- ═══════════════════════════════════════════════════ -->
+        <!-- SHARED SERVICES — Azure OpenAI                     -->
+        <!-- ═══════════════════════════════════════════════════ -->
+        <mxCell id="azure-box" value="Azure OpenAI" style="swimlane;startSize=30;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="450" y="70" width="250" height="235" as="geometry" />
+        </mxCell>
+        <mxCell id="embed-model" value="text-embedding-3-small&#xa;1536-dim vectors" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=10;" vertex="1" parent="azure-box">
+          <mxGeometry x="25" y="48" width="200" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="gpt4o-mini-box" value="gpt-4o-mini&#xa;Router · Contextualizer (cheap)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=10;" vertex="1" parent="azure-box">
+          <mxGeometry x="25" y="103" width="200" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="gpt4o-box" value="gpt-4o&#xa;Answer · Summary · Insights" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=10;" vertex="1" parent="azure-box">
+          <mxGeometry x="25" y="158" width="200" height="40" as="geometry" />
+        </mxCell>
+
+        <!-- ═══════════════════════════════════════════════════ -->
+        <!-- SHARED SERVICES — PostgreSQL                       -->
+        <!-- ═══════════════════════════════════════════════════ -->
+        <mxCell id="pg-box" value="PostgreSQL — Tenant DB (pg-va-dev)" style="swimlane;startSize=30;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="450" y="340" width="250" height="460" as="geometry" />
+        </mxCell>
+        <mxCell id="t-meetings" value="meetings&#xa;id · subject · date · status · duration" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="pg-box">
+          <mxGeometry x="15" y="45" width="220" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="t-transcripts" value="transcripts&#xa;raw_text · word_count · language" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="pg-box">
+          <mxGeometry x="15" y="98" width="220" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="t-chunks" value="chunks&#xa;text · speaker · embedding(1536)&#xa;contextual_text · text_tsv · start_ms" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="pg-box">
+          <mxGeometry x="15" y="151" width="220" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="t-summaries" value="meeting_summaries&#xa;summary_text (MOM) · embedding · topics" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="pg-box">
+          <mxGeometry x="15" y="214" width="220" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="t-insights" value="meeting_insights&#xa;action_items · key_decisions · follow_ups" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="pg-box">
+          <mxGeometry x="15" y="267" width="220" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="t-participants" value="meeting_participants&#xa;user_id · meeting_id  (RBAC gate)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="pg-box">
+          <mxGeometry x="15" y="320" width="220" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="t-chat" value="chat_sessions · chat_messages&#xa;session tracking · history (last 10)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="pg-box">
+          <mxGeometry x="15" y="373" width="220" height="40" as="geometry" />
+        </mxCell>
+
+        <!-- ═══════════════════════════════════════════════════ -->
+        <!-- CHAT / RAG QUERY PIPELINE                          -->
+        <!-- ═══════════════════════════════════════════════════ -->
+        <mxCell id="chat-lane" value="CHAT / RAG QUERY PIPELINE" style="swimlane;startSize=30;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="780" y="70" width="360" height="1000" as="geometry" />
+        </mxCell>
+
+        <mxCell id="user-query" value="User Query" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;fontStyle=1;" vertex="1" parent="chat-lane">
+          <mxGeometry x="80" y="50" width="200" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="rbac" value="RBAC Gate&#xa;get_authorized_meeting_ids()&#xa;SELECT FROM meeting_participants" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="chat-lane">
+          <mxGeometry x="80" y="118" width="200" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="router" value="Query Router&#xa;classify_query()&#xa;gpt-4o-mini · extracts filters" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="chat-lane">
+          <mxGeometry x="80" y="200" width="200" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="route-dec" value="Route?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="chat-lane">
+          <mxGeometry x="105" y="288" width="150" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- META Handler -->
+        <mxCell id="meta-h" value="META&#xa;handle_meta()&#xa;meetings SQL" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="chat-lane">
+          <mxGeometry x="10" y="385" width="90" height="55" as="geometry" />
+        </mxCell>
+        <!-- STRUCTURED Handler -->
+        <mxCell id="struct-h" value="STRUCTURED&#xa;handle_structured()&#xa;meeting_insights SQL" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="chat-lane">
+          <mxGeometry x="115" y="385" width="90" height="55" as="geometry" />
+        </mxCell>
+        <!-- SEARCH / HYBRID path -->
+        <mxCell id="embed-query" value="Embed Query&#xa;embed_single()&#xa;text-embedding-3-small" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="chat-lane">
+          <mxGeometry x="80" y="475" width="200" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="vec-search" value="pgvector Cosine Search&#xa;embedding &lt;=&gt; query_vector&#xa;WHERE meeting_id = ANY(:ids)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="chat-lane">
+          <mxGeometry x="80" y="558" width="200" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="bm25-search" value="BM25 Keyword Search&#xa;ts_rank_cd(text_tsv, query)&#xa;Postgres full-text index" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="chat-lane">
+          <mxGeometry x="80" y="640" width="200" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="rrf" value="RRF Fusion (Python)&#xa;1/(k+vec_rank) + 1/(k+bm25_rank)&#xa;top-k ranked chunks" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="chat-lane">
+          <mxGeometry x="80" y="723" width="200" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="gen-answer" value="Generate Answer&#xa;generate_answer()&#xa;gpt-4o · route-aware prompt" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="chat-lane">
+          <mxGeometry x="80" y="815" width="200" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="answer-out" value="Answer + Follow-up Question&#xa;Grounded · No hallucination&#xa;Cited with speaker + timestamp" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;fontStyle=1;" vertex="1" parent="chat-lane">
+          <mxGeometry x="80" y="905" width="200" height="55" as="geometry" />
+        </mxCell>
+
+        <!-- Chat internal arrows -->
+        <mxCell id="ce1" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="user-query" target="rbac" parent="chat-lane"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ce2" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="rbac" target="router" parent="chat-lane"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ce3" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="router" target="route-dec" parent="chat-lane"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ce4" value="META" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;" edge="1" source="route-dec" target="meta-h" parent="chat-lane"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ce5" value="STRUCTURED" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;" edge="1" source="route-dec" target="struct-h" parent="chat-lane"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ce6" value="SEARCH / HYBRID" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;" edge="1" source="route-dec" target="embed-query" parent="chat-lane"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="260" y="318"/><mxPoint x="260" y="502"/></Array></mxGeometry></mxCell>
+        <mxCell id="ce7" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="embed-query" target="vec-search" parent="chat-lane"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ce8" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="vec-search" target="bm25-search" parent="chat-lane"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ce9" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="bm25-search" target="rrf" parent="chat-lane"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ce10" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="rrf" target="gen-answer" parent="chat-lane"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ce11" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="meta-h" target="gen-answer" parent="chat-lane"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="55" y="842"/></Array></mxGeometry></mxCell>
+        <mxCell id="ce12" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="struct-h" target="gen-answer" parent="chat-lane"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="160" y="842"/></Array></mxGeometry></mxCell>
+        <mxCell id="ce13" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="gen-answer" target="answer-out" parent="chat-lane"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <!-- ═══════════════════════════════════════════════════ -->
+        <!-- CROSS-LANE CONNECTIONS (dashed)                    -->
+        <!-- ═══════════════════════════════════════════════════ -->
+
+        <!-- Ingestion → Azure OpenAI -->
+        <mxCell id="x1" value="topic sentences" style="edgeStyle=orthogonalEdgeStyle;dashed=1;strokeColor=#d79b00;fontSize=9;exitX=1;exitY=0.5;" edge="1" source="llm-context" target="gpt4o-mini-box" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="x2" value="embed chunks" style="edgeStyle=orthogonalEdgeStyle;dashed=1;strokeColor=#d79b00;fontSize=9;" edge="1" source="embedder-ing" target="embed-model" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="x3" value="MOM summary" style="edgeStyle=orthogonalEdgeStyle;dashed=1;strokeColor=#d79b00;fontSize=9;" edge="1" source="summary-gen" target="gpt4o-box" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="x4" value="insights JSON" style="edgeStyle=orthogonalEdgeStyle;dashed=1;strokeColor=#d79b00;fontSize=9;" edge="1" source="insights-gen" target="gpt4o-box" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- Ingestion → PostgreSQL -->
+        <mxCell id="x5" value="chunks + embeddings" style="edgeStyle=orthogonalEdgeStyle;dashed=1;strokeColor=#82b366;fontSize=9;" edge="1" source="save-chunks" target="t-chunks" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="x6" value="MOM + topics" style="edgeStyle=orthogonalEdgeStyle;dashed=1;strokeColor=#82b366;fontSize=9;" edge="1" source="summary-gen" target="t-summaries" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="x7" value="action_items · decisions" style="edgeStyle=orthogonalEdgeStyle;dashed=1;strokeColor=#82b366;fontSize=9;" edge="1" source="insights-gen" target="t-insights" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- Chat → Azure OpenAI -->
+        <mxCell id="x8" value="classify route" style="edgeStyle=orthogonalEdgeStyle;dashed=1;strokeColor=#d79b00;fontSize=9;" edge="1" source="router" target="gpt4o-mini-box" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="x9" value="embed query" style="edgeStyle=orthogonalEdgeStyle;dashed=1;strokeColor=#d79b00;fontSize=9;" edge="1" source="embed-query" target="embed-model" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="x10" value="final answer" style="edgeStyle=orthogonalEdgeStyle;dashed=1;strokeColor=#d79b00;fontSize=9;" edge="1" source="gen-answer" target="gpt4o-box" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- Chat → PostgreSQL -->
+        <mxCell id="x11" value="RBAC check" style="edgeStyle=orthogonalEdgeStyle;dashed=1;strokeColor=#9673a6;fontSize=9;" edge="1" source="rbac" target="t-participants" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="x12" value="vector + BM25" style="edgeStyle=orthogonalEdgeStyle;dashed=1;strokeColor=#9673a6;fontSize=9;" edge="1" source="vec-search" target="t-chunks" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="x13" value="SQL query" style="edgeStyle=orthogonalEdgeStyle;dashed=1;strokeColor=#9673a6;fontSize=9;" edge="1" source="struct-h" target="t-insights" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- ═══════════════════════════════════════════════════ -->
+        <!-- LEGEND                                             -->
+        <!-- ═══════════════════════════════════════════════════ -->
+        <mxCell id="legend-box" value="Legend" style="swimlane;startSize=25;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="450" y="840" width="250" height="195" as="geometry" />
+        </mxCell>
+        <mxCell id="l1" value="Ingestion step" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="legend-box">
+          <mxGeometry x="10" y="33" width="105" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="l2" value="Azure OpenAI call" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=10;" vertex="1" parent="legend-box">
+          <mxGeometry x="130" y="33" width="110" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="l3" value="DB write / read" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="legend-box">
+          <mxGeometry x="10" y="71" width="105" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="l4" value="Chat pipeline step" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="legend-box">
+          <mxGeometry x="130" y="71" width="110" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="l5" value="User input / output" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="legend-box">
+          <mxGeometry x="10" y="109" width="105" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="l6" value="- - - cross-service call" style="text;html=1;strokeColor=none;fillColor=none;fontSize=10;align=left;" vertex="1" parent="legend-box">
+          <mxGeometry x="130" y="109" width="115" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="l7" value="Tested: unit tests (158 passed) + live Azure OpenAI demo" style="text;html=1;strokeColor=none;fillColor=none;fontSize=9;align=left;fontStyle=2;" vertex="1" parent="legend-box">
+          <mxGeometry x="10" y="155" width="230" height="28" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

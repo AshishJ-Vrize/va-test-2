@@ -8,15 +8,17 @@ from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
+    Computed,
     DateTime,
     ForeignKey,
     Integer,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.sql import func
 
@@ -162,6 +164,12 @@ class Chunk(Base):
     IMPORTANT: Do NOT add an HNSW index here. HNSW must be created with
     CREATE INDEX CONCURRENTLY in a separate migration AFTER bulk data load,
     otherwise the migration blocks ingestion and locks the table.
+
+    contextual_text: the enriched string that was actually embedded (speaker +
+    meeting context prepended). Raw text is preserved in `text` for display.
+    embedding_version: bump when the embedding model changes so old rows can be
+    identified and backfilled via scripts/backfill_embeddings.py.
+    text_tsv: generated tsvector for BM25 hybrid retrieval — do not write to it.
     """
 
     __tablename__ = "chunks"
@@ -184,7 +192,40 @@ class Chunk(Base):
     start_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     end_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     embedding: Mapped[Optional[list[float]]] = mapped_column(Vector(1536), nullable=True)
+    contextual_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    embedding_version: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, default=1, server_default="1"
+    )
+    text_tsv: Mapped[Optional[str]] = mapped_column(
+        TSVECTOR,
+        Computed("to_tsvector('english', text)", persisted=True),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class MeetingSummary(Base):
+    """
+    Precomputed meeting-level summary with embedding for cross-meeting RAG search.
+    One row per meeting. Upserted at the end of each ingestion pipeline run.
+    """
+
+    __tablename__ = "meeting_summaries"
+
+    meeting_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("meetings.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    summary_text: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding: Mapped[Optional[list[float]]] = mapped_column(Vector(1536), nullable=True)
+    topics: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default="{}"
+    )
+    generated_by: Mapped[str] = mapped_column(String(100), nullable=False)
+    generated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
@@ -462,10 +503,10 @@ class ChatSession(Base):
         default=uuid.uuid4,
         server_default=text("gen_random_uuid()"),
     )
-    meeting_id: Mapped[uuid.UUID] = mapped_column(
+    meeting_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("meetings.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
         index=True,
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
