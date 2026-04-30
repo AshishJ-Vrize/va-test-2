@@ -9,7 +9,7 @@ from app.services.chat.prompts import ROUTER_SYSTEM
 
 log = logging.getLogger(__name__)
 
-_VALID_ROUTES = {"META", "STRUCTURED", "SEARCH", "HYBRID"}
+_VALID_ROUTES = {"META", "STRUCTURED", "SEARCH", "HYBRID", "GENERAL"}
 _FALLBACK: dict = {
     "route": "SEARCH",
     "filters": {

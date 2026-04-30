@@ -30,6 +30,7 @@ class MeetingItem(BaseModel):
     status: str
     ingestion_source: str
     your_role: str
+    join_url: str | None
 
 
 @router.get("", response_model=list[MeetingItem])
@@ -76,6 +77,7 @@ async def list_meetings(
             status=meeting.status,
             ingestion_source=meeting.ingestion_source,
             your_role=role,
+            join_url=meeting.join_url,
         )
         for meeting, role in rows
     ]

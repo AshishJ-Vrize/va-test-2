@@ -6,7 +6,7 @@ import uuid
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-_SIMILARITY_THRESHOLD = 0.75
+_SIMILARITY_THRESHOLD = 0.60
 _TOP_K = 10
 
 
@@ -48,10 +48,10 @@ async def handle_search(
         WHERE t.meeting_id = ANY(CAST(:ids AS uuid[]))
           AND c.embedding IS NOT NULL
           AND 1.0 - (c.embedding <=> CAST(:embedding AS vector)) > :threshold
-          AND (:speaker IS NULL OR c.speaker ILIKE :speaker_pattern)
-          AND (:keyword IS NULL OR c.text ILIKE :keyword_pattern)
-          AND (:date_from IS NULL OR m.meeting_date >= CAST(:date_from AS timestamptz))
-          AND (:date_to   IS NULL OR m.meeting_date <= CAST(:date_to   AS timestamptz))
+          AND (CAST(:speaker   AS text)        IS NULL OR c.speaker      ILIKE :speaker_pattern)
+          AND (CAST(:keyword   AS text)        IS NULL OR c.text         ILIKE :keyword_pattern)
+          AND (CAST(:date_from AS timestamptz) IS NULL OR m.meeting_date >= CAST(:date_from AS timestamptz))
+          AND (CAST(:date_to   AS timestamptz) IS NULL OR m.meeting_date <= CAST(:date_to   AS timestamptz))
         ORDER BY similarity_score DESC
         LIMIT :top_k
     """)

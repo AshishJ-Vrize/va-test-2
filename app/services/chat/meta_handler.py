@@ -32,15 +32,15 @@ async def handle_meta(
             m.meeting_date::text AS meeting_date,
             m.duration_minutes,
             m.status,
-            COUNT(mp.user_id) AS participant_count
+            COUNT(mp.participant_graph_id) AS participant_count
         FROM meetings m
         LEFT JOIN meeting_participants mp ON mp.meeting_id = m.id
         WHERE m.id = ANY(CAST(:ids AS uuid[]))
-          AND (:date_from IS NULL OR m.meeting_date >= CAST(:date_from AS timestamptz))
-          AND (:date_to   IS NULL OR m.meeting_date <= CAST(:date_to   AS timestamptz))
-          AND (:title     IS NULL OR m.meeting_subject ILIKE :title_pattern)
+          AND (CAST(:date_from AS timestamptz) IS NULL OR m.meeting_date >= CAST(:date_from AS timestamptz))
+          AND (CAST(:date_to   AS timestamptz) IS NULL OR m.meeting_date <= CAST(:date_to   AS timestamptz))
+          AND (CAST(:title     AS text)        IS NULL OR m.meeting_subject ILIKE :title_pattern)
           AND (
-                :date_from IS NOT NULL OR :date_to IS NOT NULL OR
+                CAST(:date_from AS timestamptz) IS NOT NULL OR CAST(:date_to AS timestamptz) IS NOT NULL OR
                 m.meeting_date >= (NOW() - INTERVAL '30 days')
               )
         GROUP BY m.id, m.meeting_subject, m.meeting_date, m.duration_minutes, m.status
@@ -62,11 +62,11 @@ async def handle_meta(
     # Fetch participant display names via users JOIN
     meeting_ids_str = "{" + ",".join(str(r.meeting_id) for r in meetings) + "}"
     part_sql = text("""
-        SELECT mp.meeting_id, u.display_name
+        SELECT mp.meeting_id, mp.participant_name AS display_name
         FROM meeting_participants mp
-        JOIN users u ON u.id = mp.user_id
         WHERE mp.meeting_id = ANY(CAST(:ids AS uuid[]))
-        ORDER BY mp.meeting_id, u.display_name
+          AND mp.participant_name IS NOT NULL
+        ORDER BY mp.meeting_id, mp.participant_name
     """)
     part_rows = await db.execute(part_sql, {"ids": meeting_ids_str})
 

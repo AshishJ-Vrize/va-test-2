@@ -14,13 +14,13 @@ log = logging.getLogger(__name__)
 _MAX_HISTORY_TURNS = 10  # last 10 user+assistant pairs = 20 messages
 
 
-async def get_authorized_meeting_ids(user_id: uuid.UUID, db: AsyncSession) -> list[uuid.UUID]:
+async def get_authorized_meeting_ids(graph_id: str, db: AsyncSession) -> list[uuid.UUID]:
     """Return meeting IDs the user personally attended — the RBAC gate for all handlers."""
     from sqlalchemy import text
 
     result = await db.execute(
-        text("SELECT DISTINCT meeting_id FROM meeting_participants WHERE user_id = :uid"),
-        {"uid": user_id},
+        text("SELECT DISTINCT meeting_id FROM meeting_participants WHERE participant_graph_id = :gid"),
+        {"gid": graph_id},
     )
     return [row[0] for row in result]
 

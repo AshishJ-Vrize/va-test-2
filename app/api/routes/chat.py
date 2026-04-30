@@ -36,13 +36,28 @@ class Source(BaseModel):
 class ChatResponse(BaseModel):
     message_id: uuid.UUID
     answer: str
-    route: str                # META | STRUCTURED | SEARCH | HYBRID
+    route: str
     fallthrough: bool = False
-    sources: list[Source]
+    sources: list[Source] = []
+    suggestions: list[str] = []
     session_id: uuid.UUID
 
 
-# ── Endpoint ──────────────────────────────────────────────────────────────────
+class SessionSummary(BaseModel):
+    id: uuid.UUID
+    title: str
+    created_at: str
+
+
+class MessageOut(BaseModel):
+    id: uuid.UUID
+    role: str
+    content: str
+    created_at: str
+    citations: list[Source] = []
+
+
+# ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat(
@@ -59,6 +74,7 @@ async def chat(
     """
     # Imported here to avoid circular imports at module level
     from app.services.chat.router import classify_query
+    from app.services.chat.suggestions import generate_suggestions
     from app.services.chat.meta_handler import handle_meta
     from app.services.chat.structured_handler import handle_structured
     from app.services.chat.search_handler import handle_search
@@ -68,17 +84,8 @@ async def chat(
     from app.services.chat.answer import generate_answer
     from app.db.tenant.models import ChatMessage
 
-    # 1. RBAC — compute once, pass to every handler
-    authorized_ids = await get_authorized_meeting_ids(current_user.id, db)
-    if not authorized_ids:
-        return ChatResponse(
-            message_id=uuid.uuid4(),
-            answer="You haven't attended any meetings yet.",
-            route="META",
-            fallthrough=False,
-            sources=[],
-            session_id=body.session_id or uuid.uuid4(),
-        )
+    # 1. RBAC — compute once, pass to every handler (empty list = no meetings yet)
+    authorized_ids = await get_authorized_meeting_ids(current_user.graph_id, db)
 
     # 2. Session
     session = await _get_or_create_session(
@@ -99,14 +106,16 @@ async def chat(
     else:
         scoped_ids = authorized_ids
 
-    # 4. Embed query (not needed for META — skip to save an API call)
+    # 4. Embed query (skip for META and GENERAL — saves an API call)
     query_embedding: list[float] = []
-    if route != "META":
+    if route not in ("META", "GENERAL"):
         query_embedding = await embed_single(search_query)
 
     # 5. Dispatch to handler
     fallthrough = False
-    if route == "META":
+    if route == "GENERAL":
+        result = []  # LLM answers from its own knowledge
+    elif route == "META":
         result = await handle_meta(scoped_ids, filters, db)
     elif route == "STRUCTURED":
         result, fell = await handle_structured(scoped_ids, filters, db)
@@ -130,10 +139,13 @@ async def chat(
         history=history,
     )
 
-    # 8. Build sources (max 5, deduplicated by meeting_id)
+    # 8. Generate suggestions (non-blocking — returns [] on any failure)
+    suggestions = await generate_suggestions(body.query, answer)
+
+    # 9. Build sources (max 5, deduplicated by meeting_id)
     sources = _build_sources(result, route)
 
-    # 9. Persist messages
+    # 10. Persist messages
     message_id = uuid.uuid4()
     db.add(ChatMessage(session_id=session.id, role="user", content=body.query))
     db.add(
@@ -141,7 +153,7 @@ async def chat(
             session_id=session.id,
             role="assistant",
             content=answer,
-            citations=[s.model_dump() for s in sources],
+            citations=[s.model_dump(mode="json") for s in sources],
         )
     )
     await db.flush()
@@ -153,8 +165,112 @@ async def chat(
         route=route,
         fallthrough=fallthrough,
         sources=sources,
+        suggestions=suggestions,
         session_id=session.id,
     )
+
+
+@router.get("/chat/sessions", response_model=list[SessionSummary])
+async def list_sessions(
+    current_user: CurrentUser = Depends(require_feature("chat")),
+    db: AsyncSession = Depends(get_tenant_db),
+) -> list[SessionSummary]:
+    from sqlalchemy import asc, desc, select
+    from app.db.tenant.models import ChatMessage, ChatSession
+
+    first_msg_sq = (
+        select(ChatMessage.content)
+        .where(
+            ChatMessage.session_id == ChatSession.id,
+            ChatMessage.role == "user",
+        )
+        .order_by(asc(ChatMessage.created_at))
+        .limit(1)
+        .correlate(ChatSession)
+        .scalar_subquery()
+    )
+
+    rows = (
+        await db.execute(
+            select(ChatSession, first_msg_sq.label("title"))
+            .where(ChatSession.user_id == current_user.id)
+            .order_by(desc(ChatSession.updated_at))
+        )
+    ).all()
+
+    return [
+        SessionSummary(
+            id=session.id,
+            title=(title or "New conversation")[:60],
+            created_at=session.created_at.isoformat(),
+        )
+        for session, title in rows
+    ]
+
+
+@router.get("/chat/sessions/{session_id}/messages", response_model=list[MessageOut])
+async def get_session_messages(
+    session_id: uuid.UUID,
+    current_user: CurrentUser = Depends(require_feature("chat")),
+    db: AsyncSession = Depends(get_tenant_db),
+) -> list[MessageOut]:
+    from sqlalchemy import asc, select
+    from app.db.tenant.models import ChatMessage, ChatSession
+
+    owner = (
+        await db.execute(
+            select(ChatSession).where(
+                ChatSession.id == session_id,
+                ChatSession.user_id == current_user.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if owner is None:
+        raise HTTPException(status_code=404, detail="Session not found.")
+
+    msgs = (
+        await db.execute(
+            select(ChatMessage)
+            .where(ChatMessage.session_id == session_id)
+            .order_by(asc(ChatMessage.created_at))
+        )
+    ).scalars().all()
+
+    return [
+        MessageOut(
+            id=m.id,
+            role=m.role,
+            content=m.content,
+            created_at=m.created_at.isoformat(),
+            citations=[Source(**c) for c in (m.citations or [])],
+        )
+        for m in msgs
+    ]
+
+
+@router.delete("/chat/sessions/{session_id}", status_code=204)
+async def delete_session(
+    session_id: uuid.UUID,
+    current_user: CurrentUser = Depends(require_feature("chat")),
+    db: AsyncSession = Depends(get_tenant_db),
+) -> None:
+    from sqlalchemy import delete, select
+    from app.db.tenant.models import ChatSession
+
+    result = await db.execute(
+        select(ChatSession).where(
+            ChatSession.id == session_id,
+            ChatSession.user_id == current_user.id,
+        )
+    )
+    session = result.scalar_one_or_none()
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found.")
+
+    await db.execute(
+        delete(ChatSession).where(ChatSession.id == session_id)
+    )
+    await db.commit()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

@@ -44,7 +44,7 @@ from app.core.security import CurrentUser
 from app.db.central.models import CreditPricing
 from app.db.central.session import get_central_db
 from app.db.tenant.models import Meeting, MeetingParticipant
-from app.services.graph.client import GraphClient
+from app.services.graph.client import GraphClient, get_access_token_app
 from app.services.graph.exceptions import (
     GraphClientError,
     MeetingNotFoundError,
@@ -125,9 +125,10 @@ async def ingest_meeting(
         meeting_graph_id, subject, current_user.tenant.org_name,
     )
 
-    # ── Step 2: resolve display names for organizer + all attendees ───────────
-    # All get_user_by_id calls fire in parallel. return_exceptions=True means
-    # one failed lookup does not cancel others — falls back to UPN.
+    # ── Step 2: resolve display names using an app-only token ────────────────
+    # GET /users/{id} requires User.Read.All which is an app permission —
+    # the delegated token from the frontend doesn't have it. We acquire an
+    # app-only token via client credentials for these lookups only.
     participants_raw = gm.get("participants", {})
     organizer_raw = participants_raw.get("organizer", {})
     organizer_graph_id: str = (
@@ -145,9 +146,14 @@ async def ingest_meeting(
     ]
     attendee_upns: list[str] = [a.get("upn") or "" for a in attendees_raw]
 
+    app_token = await asyncio.to_thread(
+        get_access_token_app, current_user.tenant.ms_tenant_id
+    )
+    app_gc = GraphClient(app_token)
+
     all_graph_ids = [organizer_graph_id] + attendee_graph_ids
     raw_results = await asyncio.gather(
-        *[gc.get_user_by_id(gid) for gid in all_graph_ids],
+        *[app_gc.get_user_by_id(gid) for gid in all_graph_ids],
         return_exceptions=True,
     )
     profiles = []

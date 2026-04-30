@@ -6,9 +6,8 @@ All DB interactions are mocked — no real PostgreSQL needed.
 Covers:
   - _parse_graph_dt: valid ISO 8601 with Z, with +00:00, None input, invalid string
   - _compute_duration: normal case, None start, None end, sub-minute rounds up to 1
-  - _upsert_user: creates new user, updates existing user, falls back for empty fields
   - _upsert_meeting: creates new meeting, updates existing (preserves no implicit status)
-  - _upsert_participant: creates new participant, no-op when already exists
+  - _upsert_participant: creates new participant, updates existing, no-op check
 """
 
 import uuid
@@ -22,9 +21,8 @@ from app.api.routes.ingest import (
     _parse_graph_dt,
     _upsert_meeting,
     _upsert_participant,
-    _upsert_user,
 )
-from app.db.tenant.models import Meeting, MeetingParticipant, User
+from app.db.tenant.models import Meeting, MeetingParticipant
 
 
 # ── DB mock helpers ───────────────────────────────────────────────────────────
@@ -116,86 +114,21 @@ class TestComputeDuration:
         assert isinstance(result, int)
 
 
-# ── _upsert_user ─────────────────────────────────────────────────────────────
-
-class TestUpsertUser:
-    async def test_creates_new_user_when_not_found(self):
-        db = _make_db(scalar_result=None)
-        await _upsert_user(db, graph_id="gid-1", email="a@b.com", display_name="Alice")
-        db.add.assert_called_once()
-        added = db.add.call_args[0][0]
-        assert isinstance(added, User)
-        assert added.graph_id == "gid-1"
-        assert added.email == "a@b.com"
-        assert added.display_name == "Alice"
-
-    async def test_new_user_has_default_role_user(self):
-        db = _make_db(scalar_result=None)
-        await _upsert_user(db, graph_id="g1", email="x@y.com", display_name="X")
-        added = db.add.call_args[0][0]
-        assert added.system_role == "user"
-
-    async def test_new_user_is_active(self):
-        db = _make_db(scalar_result=None)
-        await _upsert_user(db, graph_id="g1", email="x@y.com", display_name="X")
-        added = db.add.call_args[0][0]
-        assert added.is_active is True
-
-    async def test_updates_existing_user_email(self):
-        existing = MagicMock(spec=User)
-        db = _make_db(scalar_result=existing)
-        await _upsert_user(db, graph_id="g1", email="new@email.com", display_name="Old Name")
-        assert existing.email == "new@email.com"
-
-    async def test_updates_existing_user_display_name(self):
-        existing = MagicMock(spec=User)
-        db = _make_db(scalar_result=existing)
-        await _upsert_user(db, graph_id="g1", email="a@b.com", display_name="New Name")
-        assert existing.display_name == "New Name"
-
-    async def test_does_not_add_when_user_exists(self):
-        existing = MagicMock(spec=User)
-        db = _make_db(scalar_result=existing)
-        await _upsert_user(db, graph_id="g1", email="a@b.com", display_name="Alice")
-        db.add.assert_not_called()
-
-    async def test_returns_user_object(self):
-        db = _make_db(scalar_result=None)
-        result = await _upsert_user(db, graph_id="g1", email="a@b.com", display_name="Alice")
-        assert isinstance(result, User)
-
-    async def test_returns_existing_user_when_found(self):
-        existing = MagicMock(spec=User)
-        db = _make_db(scalar_result=existing)
-        result = await _upsert_user(db, graph_id="g1", email="a@b.com", display_name="Alice")
-        assert result is existing
-
-    async def test_email_fallback_to_graph_id_when_empty(self):
-        db = _make_db(scalar_result=None)
-        await _upsert_user(db, graph_id="gid-fallback", email="", display_name="Name")
-        added = db.add.call_args[0][0]
-        assert added.email == "gid-fallback"
-
-    async def test_display_name_fallback_when_empty(self):
-        db = _make_db(scalar_result=None)
-        await _upsert_user(db, graph_id="g1", email="a@b.com", display_name="")
-        added = db.add.call_args[0][0]
-        assert added.display_name == "Unknown"
-
-
 # ── _upsert_meeting ───────────────────────────────────────────────────────────
 
 class TestUpsertMeeting:
     BASE_DATE = datetime(2026, 3, 25, 10, 0, tzinfo=timezone.utc)
     END_DATE = datetime(2026, 3, 25, 11, 0, tzinfo=timezone.utc)
-    ORG_ID = uuid.uuid4()
+    ORG_GRAPH_ID = "org-graph-id-001"
     MEETING_GID = "meeting-graph-id-001"
 
     async def _call(self, db) -> Meeting:
         return await _upsert_meeting(
             db,
             meeting_graph_id=self.MEETING_GID,
-            organizer_id=self.ORG_ID,
+            organizer_graph_id=self.ORG_GRAPH_ID,
+            organizer_name="John Doe",
+            organizer_email="john@acme.com",
             subject="Weekly Standup",
             meeting_date=self.BASE_DATE,
             meeting_end_date=self.END_DATE,
@@ -229,6 +162,9 @@ class TestUpsertMeeting:
         assert added.meeting_graph_id == self.MEETING_GID
         assert added.meeting_subject == "Weekly Standup"
         assert added.duration_minutes == 60
+        assert added.organizer_graph_id == self.ORG_GRAPH_ID
+        assert added.organizer_name == "John Doe"
+        assert added.organizer_email == "john@acme.com"
 
     async def test_updates_existing_meeting_subject(self):
         existing = MagicMock(spec=Meeting)
@@ -241,6 +177,14 @@ class TestUpsertMeeting:
         db = _make_db(scalar_result=existing)
         await self._call(db)
         assert existing.duration_minutes == 60
+
+    async def test_updates_existing_organizer_fields(self):
+        existing = MagicMock(spec=Meeting)
+        db = _make_db(scalar_result=existing)
+        await self._call(db)
+        assert existing.organizer_graph_id == self.ORG_GRAPH_ID
+        assert existing.organizer_name == "John Doe"
+        assert existing.organizer_email == "john@acme.com"
 
     async def test_does_not_add_when_meeting_exists(self):
         existing = MagicMock(spec=Meeting)
@@ -264,37 +208,101 @@ class TestUpsertMeeting:
 
 class TestUpsertParticipant:
     MEETING_ID = uuid.uuid4()
-    USER_ID = uuid.uuid4()
+    PARTICIPANT_GRAPH_ID = "part-graph-id-001"
 
     async def test_creates_participant_when_not_found(self):
         db = _make_db(scalar_result=None)
-        await _upsert_participant(db, meeting_id=self.MEETING_ID, user_id=self.USER_ID, role="organizer")
+        await _upsert_participant(
+            db,
+            meeting_id=self.MEETING_ID,
+            participant_graph_id=self.PARTICIPANT_GRAPH_ID,
+            participant_name="Jane Doe",
+            participant_email="jane@acme.com",
+            role="organizer",
+        )
         db.add.assert_called_once()
         added = db.add.call_args[0][0]
         assert isinstance(added, MeetingParticipant)
 
     async def test_new_participant_has_correct_role(self):
         db = _make_db(scalar_result=None)
-        await _upsert_participant(db, meeting_id=self.MEETING_ID, user_id=self.USER_ID, role="attendee")
+        await _upsert_participant(
+            db,
+            meeting_id=self.MEETING_ID,
+            participant_graph_id=self.PARTICIPANT_GRAPH_ID,
+            participant_name="Jane Doe",
+            participant_email="jane@acme.com",
+            role="attendee",
+        )
         added = db.add.call_args[0][0]
         assert added.role == "attendee"
 
     async def test_new_participant_has_correct_ids(self):
         db = _make_db(scalar_result=None)
-        await _upsert_participant(db, meeting_id=self.MEETING_ID, user_id=self.USER_ID, role="organizer")
+        await _upsert_participant(
+            db,
+            meeting_id=self.MEETING_ID,
+            participant_graph_id=self.PARTICIPANT_GRAPH_ID,
+            participant_name="Jane Doe",
+            participant_email="jane@acme.com",
+            role="organizer",
+        )
         added = db.add.call_args[0][0]
         assert added.meeting_id == self.MEETING_ID
-        assert added.user_id == self.USER_ID
+        assert added.participant_graph_id == self.PARTICIPANT_GRAPH_ID
 
-    async def test_no_op_when_participant_already_exists(self):
+    async def test_new_participant_has_correct_name_and_email(self):
+        db = _make_db(scalar_result=None)
+        await _upsert_participant(
+            db,
+            meeting_id=self.MEETING_ID,
+            participant_graph_id=self.PARTICIPANT_GRAPH_ID,
+            participant_name="Jane Doe",
+            participant_email="jane@acme.com",
+            role="organizer",
+        )
+        added = db.add.call_args[0][0]
+        assert added.participant_name == "Jane Doe"
+        assert added.participant_email == "jane@acme.com"
+
+    async def test_updates_existing_participant_name_and_email(self):
         existing = MagicMock(spec=MeetingParticipant)
         db = _make_db(scalar_result=existing)
-        await _upsert_participant(db, meeting_id=self.MEETING_ID, user_id=self.USER_ID, role="organizer")
+        await _upsert_participant(
+            db,
+            meeting_id=self.MEETING_ID,
+            participant_graph_id=self.PARTICIPANT_GRAPH_ID,
+            participant_name="Updated Name",
+            participant_email="updated@acme.com",
+            role="attendee",
+        )
+        assert existing.participant_name == "Updated Name"
+        assert existing.participant_email == "updated@acme.com"
+        assert existing.role == "attendee"
+
+    async def test_does_not_add_when_participant_exists(self):
+        existing = MagicMock(spec=MeetingParticipant)
+        db = _make_db(scalar_result=existing)
+        await _upsert_participant(
+            db,
+            meeting_id=self.MEETING_ID,
+            participant_graph_id=self.PARTICIPANT_GRAPH_ID,
+            participant_name="Jane Doe",
+            participant_email="jane@acme.com",
+            role="organizer",
+        )
         db.add.assert_not_called()
 
     async def test_granted_by_is_none_by_default(self):
         db = _make_db(scalar_result=None)
-        await _upsert_participant(db, meeting_id=self.MEETING_ID, user_id=self.USER_ID, role="granted")
+        await _upsert_participant(
+            db,
+            meeting_id=self.MEETING_ID,
+            participant_graph_id=self.PARTICIPANT_GRAPH_ID,
+            participant_name="Jane Doe",
+            participant_email="jane@acme.com",
+            role="granted",
+        )
         added = db.add.call_args[0][0]
         assert added.granted_by is None
 
@@ -304,7 +312,9 @@ class TestUpsertParticipant:
         await _upsert_participant(
             db,
             meeting_id=self.MEETING_ID,
-            user_id=self.USER_ID,
+            participant_graph_id=self.PARTICIPANT_GRAPH_ID,
+            participant_name="Jane Doe",
+            participant_email="jane@acme.com",
             role="granted",
             granted_by=granter_id,
         )

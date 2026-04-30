@@ -37,8 +37,8 @@ async def handle_structured(
         FROM meeting_insights mi
         JOIN meetings m ON mi.meeting_id = m.id
         WHERE mi.meeting_id = ANY(CAST(:ids AS uuid[]))
-          AND (:date_from IS NULL OR m.meeting_date >= CAST(:date_from AS timestamptz))
-          AND (:date_to   IS NULL OR m.meeting_date <= CAST(:date_to   AS timestamptz))
+          AND (CAST(:date_from AS timestamptz) IS NULL OR m.meeting_date >= CAST(:date_from AS timestamptz))
+          AND (CAST(:date_to   AS timestamptz) IS NULL OR m.meeting_date <= CAST(:date_to   AS timestamptz))
         ORDER BY m.meeting_date DESC
         LIMIT 50
     """)

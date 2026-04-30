@@ -24,17 +24,17 @@ async def generate_answer(
     """
     from app.services.ingestion.contextualizer import _get_client
 
-    if not handler_result:
-        return _NO_RESULTS_MSG
-
-    context = _build_context(handler_result, route)
     system = ROUTE_PROMPTS.get(route, ROUTE_PROMPTS["SEARCH"])
     deployment = get_settings().AZURE_OPENAI_DEPLOYMENT_LLM
     client = _get_client()
 
     messages: list[dict] = [{"role": "system", "content": system}]
     messages.extend(_truncate_history(history))
-    messages.append({"role": "user", "content": f"Context:\n{context}\n\nQuestion: {query}"})
+    if handler_result:
+        context = _build_context(handler_result, route)
+        messages.append({"role": "user", "content": f"Context:\n{context}\n\nQuestion: {query}"})
+    else:
+        messages.append({"role": "user", "content": query})
 
     try:
         resp = await client.chat.completions.create(

@@ -17,6 +17,7 @@ if sys.platform == "win32":
 
 import redis.asyncio as aioredis
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 import app.core.state as _state
@@ -92,14 +93,27 @@ app = FastAPI(
 
 from app.api.middleware.tenant import RequestTracingMiddleware  # noqa: E402
 from app.api.routes.auth import router as auth_router          # noqa: E402
+from app.api.routes.chat import router as chat_router          # noqa: E402
 from app.api.routes.health import router as health_router      # noqa: E402
 from app.api.routes.ingest import router as ingest_router      # noqa: E402
 from app.api.routes.meetings import router as meetings_router  # noqa: E402
+from app.api.routes.seed import router as seed_router          # noqa: E402
 from app.api.routes.webhook import router as webhook_router    # noqa: E402
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",   # Next.js dev server
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 app.add_middleware(RequestTracingMiddleware)
 app.include_router(health_router)
 app.include_router(auth_router)
+app.include_router(chat_router)
+app.include_router(seed_router)
 app.include_router(webhook_router, prefix="/api/v1/webhook", tags=["webhook"])
 app.include_router(ingest_router)
 app.include_router(meetings_router)
