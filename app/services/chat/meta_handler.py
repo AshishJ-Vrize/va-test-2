@@ -41,6 +41,7 @@ async def handle_meta(
           AND (CAST(:title     AS text)        IS NULL OR m.meeting_subject ILIKE :title_pattern)
           AND (
                 CAST(:date_from AS timestamptz) IS NOT NULL OR CAST(:date_to AS timestamptz) IS NOT NULL OR
+                CAST(:title AS text) IS NOT NULL OR
                 m.meeting_date >= (NOW() - INTERVAL '30 days')
               )
         GROUP BY m.id, m.meeting_subject, m.meeting_date, m.duration_minutes, m.status

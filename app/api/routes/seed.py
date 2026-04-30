@@ -102,5 +102,15 @@ async def apply_rag_migration(
         """))
         applied.append("meeting_summaries table")
 
+    # Add GIN index on text_tsv if missing (needed for BM25 performance)
+    result = await db.execute(text(
+        "SELECT 1 FROM pg_indexes WHERE tablename='chunks' AND indexname='idx_chunks_text_tsv'"
+    ))
+    if not result.scalar():
+        await db.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_chunks_text_tsv ON chunks USING GIN (text_tsv)"
+        ))
+        applied.append("idx_chunks_text_tsv GIN index")
+
     await db.commit()
     return {"status": "ok", "applied": applied}

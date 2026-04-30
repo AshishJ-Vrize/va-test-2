@@ -125,8 +125,12 @@ async def chat(
             result = await handle_search(query_embedding, search_query, scoped_ids, filters, db)
     elif route == "SEARCH":
         result = await handle_search(query_embedding, search_query, scoped_ids, filters, db)
+        if not result:
+            route = "GENERAL"
     else:  # HYBRID
         result = await handle_hybrid(query_embedding, search_query, scoped_ids, filters, db)
+        if not result:
+            route = "GENERAL"
 
     # 6. History
     history = await _load_history(session.id, db)
