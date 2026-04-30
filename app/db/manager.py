@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from contextlib import asynccontextmanager
+from urllib.parse import quote_plus
 from dataclasses import dataclass
 from threading import Lock
 from typing import TYPE_CHECKING, AsyncGenerator
@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, AsyncGenerator
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from app.config.settings import get_settings
 from app.db.registry import CachedTenant
 from app.db.tenant.session import make_tenant_engine, make_tenant_session_factory
 
@@ -107,13 +108,13 @@ class DatabaseManager:
             return entry
 
     def _build_url(self, cached_tenant: CachedTenant) -> str:
-        secret = os.environ.get("TENANT_DB_PASSWORD") or self._kv.get_db_secret(cached_tenant.org_name)
-        db_user = os.environ["TENANT_DB_USER"]
+        secret = self._kv.get_db_secret(cached_tenant.org_name)
+        db_user = get_settings().TENANT_DB_USER
         db_host = cached_tenant.db_host
         db_name = _db_name(cached_tenant.org_name)
         # psycopg3 async driver — postgresql+psycopg_async://
         return (
-            f"postgresql+psycopg_async://{db_user}:{secret}"
+            f"postgresql+psycopg_async://{quote_plus(db_user)}:{quote_plus(secret)}"
             f"@{db_host}/{db_name}?sslmode=require"
         )
 

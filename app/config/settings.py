@@ -14,14 +14,9 @@ class Settings(BaseSettings):
     # ── Tenant DB auth ─────────────────────────────────────────────────────
     TENANT_DB_USER: str
 
-    # ── Tenant DB password ─────────────────────────────────────────────────
-    TENANT_DB_PASSWORD: str  # Shared across all tenant DBs on the same server
-
     # ── Azure Key Vault ────────────────────────────────────────────────────
-    # Secret naming convention: db-{org_name}  ← pending team confirmation
-    # AZURE_KEYVAULT_URL: str  # Uncomment when switching to Azure Key Vault
+    # Secret naming convention: tenant-db-user-password (single shared secret)
     AZURE_KEYVAULT_URL: str
-
 
     # ── Redis ──────────────────────────────────────────────────────────────
     REDIS_URL: str
@@ -37,7 +32,6 @@ class Settings(BaseSettings):
     AZURE_OPENAI_DEPLOYMENT_LLM: str        # e.g. gpt-4o
 
     # ── Azure Text Analytics ───────────────────────────────────────────────
-    # Used by sentiment team — not Sprint 1. Optional until integrated.
     AZURE_TEXT_ANALYTICS_ENDPOINT: str = ""
     AZURE_TEXT_ANALYTICS_KEY: str = ""
 
