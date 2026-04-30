@@ -39,7 +39,7 @@ class MeetingsMixin:
 
     # ── User methods ──────────────────────────────────────────────────────────
 
-    def get_me(self) -> dict:
+    async def get_me(self) -> dict:
         """
         GET /me
 
@@ -53,14 +53,14 @@ class MeetingsMixin:
             GraphClientError:   Graph returned a non-2xx response.
         """
         logger.debug("get_me: fetching current user profile")
-        result = self.get("/me")
+        result = await self.get("/me")
         logger.debug(
             "get_me: success | user_id=%s | upn=%s",
             result.get("id"), result.get("userPrincipalName"),
         )
         return result
 
-    def get_user_by_id(self, user_graph_id: str) -> dict | None:
+    async def get_user_by_id(self, user_graph_id: str) -> dict | None:
         """
         GET /users/{user_graph_id}
 
@@ -87,7 +87,7 @@ class MeetingsMixin:
         logger.debug("get_user_by_id: fetching user | user_graph_id=%s", user_graph_id)
 
         try:
-            result = self.get(f"/users/{user_graph_id}")
+            result = await self.get(f"/users/{user_graph_id}")
             logger.debug(
                 "get_user_by_id: success | user_graph_id=%s | display_name=%s",
                 user_graph_id, result.get("displayName"),
@@ -108,7 +108,7 @@ class MeetingsMixin:
 
     # ── Meeting methods ───────────────────────────────────────────────────────
 
-    def get_online_meeting(
+    async def get_online_meeting(
         self,
         meeting_id: str,
         user_id: str | None = None,
@@ -139,14 +139,14 @@ class MeetingsMixin:
             meeting_id, user_id, path,
         )
 
-        result = self.get(path)
+        result = await self.get(path)
         logger.info(
             "get_online_meeting: success | meeting_id=%s | subject=%s",
             meeting_id, result.get("subject"),
         )
         return result
 
-    def get_meeting_by_join_url(
+    async def get_meeting_by_join_url(
         self,
         join_url: str,
         user_id: str | None = None,
@@ -185,7 +185,7 @@ class MeetingsMixin:
             user_id, join_url,
         )
 
-        result = self.get(base, params={"$filter": odata_filter})
+        result = await self.get(base, params={"$filter": odata_filter})
         meetings = result.get("value", [])
 
         if not meetings:

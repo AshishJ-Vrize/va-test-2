@@ -2,9 +2,9 @@
 # Owner: Graph + Routes team
 # Reference: CONTEXT.md Section 13 (client.py exports)
 
+import asyncio
 import logging
 import random
-import time
 from typing import Any
 
 import httpx
@@ -32,7 +32,7 @@ __all__ = ["GraphClient", "GraphClientError", "TokenExpiredError", "get_access_t
 
 class GraphClient(MeetingsMixin, TranscriptsMixin):
     """
-    HTTP wrapper around the Microsoft Graph REST API with retry and error handling.
+    Async HTTP wrapper around the Microsoft Graph REST API with retry and error handling.
 
     Retry policy (handled inside _request):
       - Network error / timeout : retry up to MAX_RETRIES with exponential backoff + jitter
@@ -62,7 +62,7 @@ class GraphClient(MeetingsMixin, TranscriptsMixin):
 
     # ── Public HTTP methods ───────────────────────────────────────────────────
 
-    def get(
+    async def get(
         self,
         path: str,
         params: dict[str, Any] | None = None,
@@ -76,21 +76,21 @@ class GraphClient(MeetingsMixin, TranscriptsMixin):
             params:  OData query parameters (e.g. {'$top': 20, '$filter': '...'}).
             timeout: Request timeout in seconds. Default 30s.
         """
-        return self._request("GET", path, params=params, timeout=timeout)
+        return await self._request("GET", path, params=params, timeout=timeout)
 
-    def post(self, path: str, body: dict, timeout: float = 30.0) -> dict:
+    async def post(self, path: str, body: dict, timeout: float = 30.0) -> dict:
         """POST {GRAPH_BASE}{path} with JSON body."""
-        return self._request("POST", path, json=body, timeout=timeout)
+        return await self._request("POST", path, json=body, timeout=timeout)
 
-    def patch(self, path: str, body: dict, timeout: float = 30.0) -> dict:
+    async def patch(self, path: str, body: dict, timeout: float = 30.0) -> dict:
         """PATCH {GRAPH_BASE}{path} with JSON body."""
-        return self._request("PATCH", path, json=body, timeout=timeout)
+        return await self._request("PATCH", path, json=body, timeout=timeout)
 
-    def delete(self, path: str, timeout: float = 30.0) -> None:
+    async def delete(self, path: str, timeout: float = 30.0) -> None:
         """DELETE {GRAPH_BASE}{path}. Returns None on success (Graph sends 204)."""
-        self._request("DELETE", path, timeout=timeout, expect_json=False)
+        await self._request("DELETE", path, timeout=timeout, expect_json=False)
 
-    def get_text(
+    async def get_text(
         self,
         path: str,
         params: dict[str, Any] | None = None,
@@ -105,7 +105,7 @@ class GraphClient(MeetingsMixin, TranscriptsMixin):
         VTT → structured conversion is NOT done here.
         That belongs to services/ingestion/vtt_parser.py.
         """
-        return self._request("GET", path, params=params, timeout=timeout, return_text=True)
+        return await self._request("GET", path, params=params, timeout=timeout, return_text=True)
 
     # ── Path helper ───────────────────────────────────────────────────────────
 
@@ -124,7 +124,7 @@ class GraphClient(MeetingsMixin, TranscriptsMixin):
 
     # ── Internal request handler ──────────────────────────────────────────────
 
-    def _request(
+    async def _request(
         self,
         method: str,
         path: str,
@@ -134,7 +134,7 @@ class GraphClient(MeetingsMixin, TranscriptsMixin):
         **kwargs: Any,
     ) -> dict | str | None:
         """
-        Central HTTP request handler. Implements all retry and error handling.
+        Central async HTTP request handler. Implements all retry and error handling.
 
         Retry targets: network errors, timeouts, 429, 5xx — up to MAX_RETRIES.
         No-retry targets: 401, 400, 403, 404 — fail immediately with full context.
@@ -146,189 +146,202 @@ class GraphClient(MeetingsMixin, TranscriptsMixin):
         url = f"{GRAPH_BASE}{path}"
         attempt = 0
 
-        while attempt < MAX_RETRIES:
-            attempt += 1
-            self._log.debug(
-                "Graph request | method=%s | url=%s | attempt=%d/%d",
-                method, url, attempt, MAX_RETRIES,
-            )
-
-            # ── Send the request ──────────────────────────────────────────────
-            try:
-                response = httpx.request(
-                    method,
-                    url,
-                    headers=self._headers,
-                    timeout=timeout,
-                    **kwargs,
-                )
-            except httpx.TimeoutException as exc:
-                wait = self._backoff_wait(attempt)
-                self._log.warning(
-                    "Graph timeout | method=%s | url=%s | attempt=%d/%d | "
-                    "timeout=%ss | retrying_in=%.1fs",
-                    method, url, attempt, MAX_RETRIES, timeout, wait,
-                )
-                if attempt < MAX_RETRIES:
-                    time.sleep(wait)
-                    continue
-                self._log.error(
-                    "Graph timeout — retries exhausted | method=%s | url=%s", method, url
-                )
-                raise GraphClientError(
-                    f"Graph API timed out after {timeout}s on {method} {path}. "
-                    f"Tried {MAX_RETRIES} times. "
-                    "If this persists, Microsoft Graph may be experiencing an outage.",
-                    status_code=None,
-                ) from exc
-
-            except httpx.RequestError as exc:
-                wait = self._backoff_wait(attempt)
-                self._log.warning(
-                    "Graph network error | method=%s | url=%s | attempt=%d/%d | "
-                    "error=%s | retrying_in=%.1fs",
-                    method, url, attempt, MAX_RETRIES, exc, wait,
-                )
-                if attempt < MAX_RETRIES:
-                    time.sleep(wait)
-                    continue
-                self._log.error(
-                    "Graph network error — retries exhausted | method=%s | url=%s | error=%s",
-                    method, url, exc,
-                )
-                raise GraphClientError(
-                    f"Network error reaching Graph API on {method} {path}: {exc}. "
-                    f"Tried {MAX_RETRIES} times. Check connectivity.",
-                    status_code=None,
-                ) from exc
-
-            # ── Handle response status codes ──────────────────────────────────
-
-            # 429 — rate limit: respect Retry-After, then retry
-            if response.status_code == 429:
-                retry_after = self._parse_retry_after(response, fallback=self._backoff_wait(attempt))
-                self._log.warning(
-                    "Graph rate limit (429) | method=%s | url=%s | attempt=%d/%d | "
-                    "retry_after=%.1fs",
-                    method, url, attempt, MAX_RETRIES, retry_after,
-                )
-                if attempt < MAX_RETRIES:
-                    time.sleep(retry_after)
-                    continue
-                self._log.error(
-                    "Graph rate limit — retries exhausted | method=%s | url=%s", method, url
-                )
-                raise GraphClientError(
-                    f"Graph API rate limit hit on {method} {path}. "
-                    f"Tried {MAX_RETRIES} times. Reduce request frequency.",
-                    status_code=429,
+        async with httpx.AsyncClient() as client:
+            while attempt < MAX_RETRIES:
+                attempt += 1
+                self._log.debug(
+                    "Graph request | method=%s | url=%s | attempt=%d/%d",
+                    method, url, attempt, MAX_RETRIES,
                 )
 
-            # 5xx — server error: retry with backoff
-            if response.status_code >= 500:
-                error_body = self._safe_json(response)
-                graph_code = error_body.get("error", {}).get("code", "unknown") if error_body else "unknown"
-                graph_message = error_body.get("error", {}).get("message", response.text) if error_body else response.text
-                wait = self._backoff_wait(attempt)
-                self._log.warning(
-                    "Graph server error (5xx) | method=%s | url=%s | status=%s | "
-                    "graph_code=%s | attempt=%d/%d | retrying_in=%.1fs",
-                    method, url, response.status_code, graph_code, attempt, MAX_RETRIES, wait,
-                )
-                if attempt < MAX_RETRIES:
-                    time.sleep(wait)
-                    continue
-                self._log.error(
-                    "Graph server error — retries exhausted | method=%s | url=%s | "
-                    "status=%s | graph_code=%s | graph_message=%s",
-                    method, url, response.status_code, graph_code, graph_message,
-                )
-                raise GraphClientError(
-                    f"Graph API server error {response.status_code} on {method} {path}. "
-                    f"graph_code={graph_code!r} | graph_message={graph_message!r}. "
-                    f"Tried {MAX_RETRIES} times. Microsoft Graph may be experiencing an outage.",
-                    status_code=response.status_code,
+                # ── Send the request ──────────────────────────────────────────────
+                try:
+                    response = await client.request(
+                        method,
+                        url,
+                        headers=self._headers,
+                        timeout=timeout,
+                        **kwargs,
+                    )
+                except httpx.TimeoutException as exc:
+                    wait = self._backoff_wait(attempt)
+                    self._log.warning(
+                        "Graph timeout | method=%s | url=%s | attempt=%d/%d | "
+                        "timeout=%ss | retrying_in=%.1fs",
+                        method, url, attempt, MAX_RETRIES, timeout, wait,
+                    )
+                    if attempt < MAX_RETRIES:
+                        await asyncio.sleep(wait)
+                        continue
+                    self._log.error(
+                        "Graph timeout — retries exhausted | method=%s | url=%s", method, url
+                    )
+                    raise GraphClientError(
+                        f"Graph API timed out after {timeout}s on {method} {path}. "
+                        f"Tried {MAX_RETRIES} times. "
+                        "If this persists, Microsoft Graph may be experiencing an outage.",
+                        status_code=None,
+                    ) from exc
+
+                except httpx.RequestError as exc:
+                    wait = self._backoff_wait(attempt)
+                    self._log.warning(
+                        "Graph network error | method=%s | url=%s | attempt=%d/%d | "
+                        "error=%s | retrying_in=%.1fs",
+                        method, url, attempt, MAX_RETRIES, exc, wait,
+                    )
+                    if attempt < MAX_RETRIES:
+                        await asyncio.sleep(wait)
+                        continue
+                    self._log.error(
+                        "Graph network error — retries exhausted | method=%s | url=%s | error=%s",
+                        method, url, exc,
+                    )
+                    raise GraphClientError(
+                        f"Network error reaching Graph API on {method} {path}: {exc}. "
+                        f"Tried {MAX_RETRIES} times. Check connectivity.",
+                        status_code=None,
+                    ) from exc
+
+                # ── Handle response status codes ──────────────────────────────────
+
+                # 429 — rate limit: respect Retry-After, then retry
+                if response.status_code == 429:
+                    retry_after = self._parse_retry_after(response, fallback=self._backoff_wait(attempt))
+                    self._log.warning(
+                        "Graph rate limit (429) | method=%s | url=%s | attempt=%d/%d | "
+                        "retry_after=%.1fs",
+                        method, url, attempt, MAX_RETRIES, retry_after,
+                    )
+                    if attempt < MAX_RETRIES:
+                        await asyncio.sleep(retry_after)
+                        continue
+                    self._log.error(
+                        "Graph rate limit — retries exhausted | method=%s | url=%s", method, url
+                    )
+                    raise GraphClientError(
+                        f"Graph API rate limit hit on {method} {path}. "
+                        f"Tried {MAX_RETRIES} times. Reduce request frequency.",
+                        status_code=429,
+                    )
+
+                # 5xx — server error: retry with backoff
+                if response.status_code >= 500:
+                    error_body = self._safe_json(response)
+                    graph_code = error_body.get("error", {}).get("code", "unknown") if error_body else "unknown"
+                    graph_message = error_body.get("error", {}).get("message", response.text) if error_body else response.text
+                    wait = self._backoff_wait(attempt)
+                    self._log.warning(
+                        "Graph server error (5xx) | method=%s | url=%s | status=%s | "
+                        "graph_code=%s | attempt=%d/%d | retrying_in=%.1fs",
+                        method, url, response.status_code, graph_code, attempt, MAX_RETRIES, wait,
+                    )
+                    if attempt < MAX_RETRIES:
+                        await asyncio.sleep(wait)
+                        continue
+                    self._log.error(
+                        "Graph server error — retries exhausted | method=%s | url=%s | "
+                        "status=%s | graph_code=%s | graph_message=%s",
+                        method, url, response.status_code, graph_code, graph_message,
+                    )
+                    raise GraphClientError(
+                        f"Graph API server error {response.status_code} on {method} {path}. "
+                        f"graph_code={graph_code!r} | graph_message={graph_message!r}. "
+                        f"Tried {MAX_RETRIES} times. Microsoft Graph may be experiencing an outage.",
+                        status_code=response.status_code,
+                    )
+
+                # 401 — token expired: no retry, frontend must re-authenticate
+                if response.status_code == 401:
+                    self._log.warning(
+                        "Graph 401 — token expired | method=%s | url=%s", method, url
+                    )
+                    raise TokenExpiredError(
+                        f"Graph API returned 401 on {method} {path}. "
+                        "The delegated access token has expired. "
+                        "The frontend must re-authenticate via MSAL and retry."
+                    )
+
+                # 400 — bad request: this is our bug, log everything for debugging
+                if response.status_code == 400:
+                    error_body = self._safe_json(response)
+                    graph_code = error_body.get("error", {}).get("code", "unknown") if error_body else "unknown"
+                    graph_message = error_body.get("error", {}).get("message", response.text) if error_body else response.text
+                    request_params = kwargs.get("params")
+                    request_body = kwargs.get("json")
+                    self._log.error(
+                        "Graph 400 Bad Request — THIS IS A CODE BUG | "
+                        "method=%s | url=%s | params=%s | body=%s | "
+                        "graph_code=%s | graph_message=%s",
+                        method, url, request_params, request_body,
+                        graph_code, graph_message,
+                    )
+                    raise GraphClientError(
+                        f"Graph API rejected our request (400) on {method} {path}. "
+                        f"graph_code={graph_code!r} | graph_message={graph_message!r} | "
+                        f"params={request_params!r} | body={request_body!r}. "
+                        "This is a code bug — check the request parameters.",
+                        status_code=400,
+                    )
+
+                # 403 / 404 — no retry, surface graph_code and likely cause
+                if response.status_code in (403, 404):
+                    error_body = self._safe_json(response)
+                    graph_code = error_body.get("error", {}).get("code", "unknown") if error_body else "unknown"
+                    graph_message = error_body.get("error", {}).get("message", response.text) if error_body else response.text
+                    likely_cause = self._likely_cause(url, response.status_code, graph_code)
+                    self._log.error(
+                        "Graph %s | method=%s | url=%s | graph_code=%s | "
+                        "graph_message=%s | likely_cause=%s",
+                        response.status_code, method, url, graph_code,
+                        graph_message, likely_cause,
+                    )
+                    raise GraphClientError(
+                        f"Graph API {response.status_code} on {method} {path}. "
+                        f"graph_code={graph_code!r} | graph_message={graph_message!r} | "
+                        f"likely_cause={likely_cause!r}",
+                        status_code=response.status_code,
+                    )
+
+                # Other non-2xx (e.g. 405, 409, 410) — no retry
+                if not response.is_success:
+                    error_body = self._safe_json(response)
+                    graph_code = error_body.get("error", {}).get("code", "unknown") if error_body else "unknown"
+                    graph_message = error_body.get("error", {}).get("message", response.text) if error_body else response.text
+                    self._log.error(
+                        "Graph unexpected error | method=%s | url=%s | status=%s | "
+                        "graph_code=%s | graph_message=%s",
+                        method, url, response.status_code, graph_code, graph_message,
+                    )
+                    raise GraphClientError(
+                        f"Graph API error {response.status_code} on {method} {path}. "
+                        f"graph_code={graph_code!r} | graph_message={graph_message!r}",
+                        status_code=response.status_code,
+                    )
+
+                # ── Success ───────────────────────────────────────────────────────
+                self._log.debug(
+                    "Graph request success | method=%s | url=%s | status=%s",
+                    method, url, response.status_code,
                 )
 
-            # 401 — token expired: no retry, frontend must re-authenticate
-            if response.status_code == 401:
-                self._log.warning(
-                    "Graph 401 — token expired | method=%s | url=%s", method, url
-                )
-                raise TokenExpiredError(
-                    f"Graph API returned 401 on {method} {path}. "
-                    "The delegated access token has expired. "
-                    "The frontend must re-authenticate via MSAL and retry."
-                )
-
-            # 400 — bad request: this is our bug, log everything for debugging
-            if response.status_code == 400:
-                error_body = self._safe_json(response)
-                graph_code = error_body.get("error", {}).get("code", "unknown") if error_body else "unknown"
-                graph_message = error_body.get("error", {}).get("message", response.text) if error_body else response.text
-                request_params = kwargs.get("params")
-                request_body = kwargs.get("json")
-                self._log.error(
-                    "Graph 400 Bad Request — THIS IS A CODE BUG | "
-                    "method=%s | url=%s | params=%s | body=%s | "
-                    "graph_code=%s | graph_message=%s",
-                    method, url, request_params, request_body,
-                    graph_code, graph_message,
-                )
-                raise GraphClientError(
-                    f"Graph API rejected our request (400) on {method} {path}. "
-                    f"graph_code={graph_code!r} | graph_message={graph_message!r} | "
-                    f"params={request_params!r} | body={request_body!r}. "
-                    "This is a code bug — check the request parameters.",
-                    status_code=400,
-                )
-
-            # 403 / 404 — no retry, surface graph_code and likely cause
-            if response.status_code in (403, 404):
-                error_body = self._safe_json(response)
-                graph_code = error_body.get("error", {}).get("code", "unknown") if error_body else "unknown"
-                graph_message = error_body.get("error", {}).get("message", response.text) if error_body else response.text
-                likely_cause = self._likely_cause(url, response.status_code, graph_code)
-                self._log.error(
-                    "Graph %s | method=%s | url=%s | graph_code=%s | "
-                    "graph_message=%s | likely_cause=%s",
-                    response.status_code, method, url, graph_code,
-                    graph_message, likely_cause,
-                )
-                raise GraphClientError(
-                    f"Graph API {response.status_code} on {method} {path}. "
-                    f"graph_code={graph_code!r} | graph_message={graph_message!r} | "
-                    f"likely_cause={likely_cause!r}",
-                    status_code=response.status_code,
-                )
-
-            # Other non-2xx (e.g. 405, 409, 410) — no retry
-            if not response.is_success:
-                error_body = self._safe_json(response)
-                graph_code = error_body.get("error", {}).get("code", "unknown") if error_body else "unknown"
-                graph_message = error_body.get("error", {}).get("message", response.text) if error_body else response.text
-                self._log.error(
-                    "Graph unexpected error | method=%s | url=%s | status=%s | "
-                    "graph_code=%s | graph_message=%s",
-                    method, url, response.status_code, graph_code, graph_message,
-                )
-                raise GraphClientError(
-                    f"Graph API error {response.status_code} on {method} {path}. "
-                    f"graph_code={graph_code!r} | graph_message={graph_message!r}",
-                    status_code=response.status_code,
-                )
-
-            # ── Success ───────────────────────────────────────────────────────
-            self._log.debug(
-                "Graph request success | method=%s | url=%s | status=%s",
-                method, url, response.status_code,
-            )
-
-            if return_text:
-                return response.text
-            if not expect_json:
-                return None
-            return response.json()
+                if return_text:
+                    return response.text
+                if not expect_json:
+                    return None
+                try:
+                    return response.json()
+                except Exception as exc:
+                    self._log.error(
+                        "Graph returned 2xx but body is not valid JSON | "
+                        "method=%s | url=%s | status=%s | body_preview=%.200s | error=%s",
+                        method, url, response.status_code, response.text, exc,
+                    )
+                    raise GraphClientError(
+                        f"Graph API {response.status_code} on {method} {path} returned "
+                        f"non-JSON body: {exc}. body_preview={response.text[:200]!r}",
+                        status_code=response.status_code,
+                    ) from exc
 
         # Should never reach here — loop always returns or raises
         raise GraphClientError(  # pragma: no cover
@@ -439,7 +452,8 @@ _msal_app_cache: dict[str, msal.ConfidentialClientApplication] = {}
 def get_access_token_app(ms_tenant_id: str) -> str:
     """
     Obtains an app-only access token for the given customer tenant using the
-    client credentials flow. Used by the webhook service only.
+    client credentials flow. MSAL is synchronous — wrap with asyncio.to_thread()
+    when calling from async code.
 
     401 handling for app tokens: MSAL handles token refresh internally via
     acquire_token_for_client(). If Graph returns 401 with an app token, it

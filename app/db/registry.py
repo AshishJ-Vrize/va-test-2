@@ -4,7 +4,8 @@ import logging
 from dataclasses import dataclass
 from threading import RLock
 
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.central.models import Tenant
 
@@ -39,14 +40,16 @@ class TenantRegistry:
     - load_all() replaces the whole cache atomically under the lock.
     - get() is intentionally lock-free on the read path — dict reads
       in CPython are safe due to the GIL, and CachedTenant is immutable.
+    - load_all() and refresh_one() are async — they use AsyncSession.
     """
 
     def __init__(self) -> None:
         self._cache: dict[str, CachedTenant] = {}
         self._lock = RLock()
 
-    def load_all(self, session: Session) -> None:
-        rows = session.query(Tenant).all()
+    async def load_all(self, session: AsyncSession) -> None:
+        result = await session.execute(select(Tenant))
+        rows = result.scalars().all()
         new_cache: dict[str, CachedTenant] = {}
         for row in rows:
             cached = CachedTenant(
@@ -87,12 +90,13 @@ class TenantRegistry:
         with self._lock:
             self._cache.pop(ms_tenant_id, None)
 
-    def refresh_one(self, ms_tenant_id: str, session: Session) -> CachedTenant | None:
-        row = (
-            session.query(Tenant)
-            .filter(Tenant.ms_tenant_id == ms_tenant_id)
-            .first()
+    async def refresh_one(
+        self, ms_tenant_id: str, session: AsyncSession
+    ) -> CachedTenant | None:
+        result = await session.execute(
+            select(Tenant).where(Tenant.ms_tenant_id == ms_tenant_id)
         )
+        row = result.scalar_one_or_none()
         if row is None:
             self.invalidate(ms_tenant_id)
             return None
@@ -100,4 +104,5 @@ class TenantRegistry:
         return self.get(ms_tenant_id)
 
 
-tenant_registry = TenantRegistry()
+# No module-level singleton — use app.core.state.get_tenant_registry()
+# FastAPI deps read from app.state (set by lifespan). Celery uses state.py directly.

@@ -372,11 +372,13 @@ No exceptions. Even admins go through this gate for the chat endpoint.
 - **Device code flow:** Removed entirely — it was MVP only
 - **Disk token cache (`.token_cache.json`):** Removed entirely
 
-### App auth (backend → Microsoft Graph, for webhooks only)
-- **Flow:** Client credentials (app-only)
+### App auth (backend → Microsoft Graph, for ALL Graph calls)
+- **Flow:** Client credentials (app-only) — confirmed as the only Graph token strategy
 - **Function:** `get_access_token_app(ms_tenant_id: str)` in `app/services/graph/client.py`
 - **Scope requested:** `https://graph.microsoft.com/.default`
-- **Used for:** Webhook registration and callRecords processing only
+- **Used for:** All Graph API calls — webhook registration, callRecords, meeting lookup, transcript fetch
+- **Path rule:** Always use `/users/{user_id}/onlineMeetings/...` — never `/me/` (app tokens return 400 on /me/)
+- **OBO flow:** Not used. Resolved 2026-04-22 — see Section 18 Q1.
 
 ### Token cache
 - **Store:** Azure Redis Cache — confirmed
@@ -927,11 +929,11 @@ Transcript content format: `text/vtt` (raw string). Parsing is `services/ingesti
 
 These decisions have NOT been finalized. Do not write code that depends on them.
 
-| # | Question | Affects |
-|---|----------|---------|
-| 1 | Does the backend use OBO (On-Behalf-Of) flow to call Graph API on behalf of users, or does the frontend pass a delegated Graph token directly? | `graph/meetings.py`, `graph/transcripts.py`, ingest routes |
-| 2 | Key Vault secret naming convention — confirmed as `db-{org_name}`? | `core/keyvault.py`, `provisioning/` |
-| 3 | Database name on PostgreSQL server — is it `pg-{org_name}` or `{org_name}` or something else? | `db/manager.py`, connection string template |
+| # | Question | Affects | Status |
+|---|----------|---------|--------|
+| 1 | ~~Does the backend use OBO (On-Behalf-Of) flow to call Graph API on behalf of users, or does the frontend pass a delegated Graph token directly?~~ | `graph/meetings.py`, `graph/transcripts.py`, ingest routes | ✅ **RESOLVED 2026-04-22** — Option C: app-only tokens for all Graph calls. Backend never calls Graph on behalf of a user. Ingestion is webhook-triggered (Celery, app token, `/users/{user_id}/` paths). Routes read from DB only, never call Graph directly. No OBO, no delegated Graph token from frontend. |
+| 2 | Key Vault secret naming convention — confirmed as `db-{org_name}`? | `core/keyvault.py`, `provisioning/` | ⏳ Pending provisioning team |
+| 3 | Database name on PostgreSQL server — is it `pg-{org_name}` or `{org_name}` or something else? | `db/manager.py`, connection string template | ⏳ Pending provisioning team |
 
 ---
 
