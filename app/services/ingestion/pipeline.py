@@ -59,6 +59,7 @@ async def run_ingestion_pipeline(
     11. Generate a meeting-level summary and embed it → upsert meeting_summaries.
         Used for cross-meeting RAG search.
     12. Set meeting.status = 'ready'.
+    13. Generate meeting insights (non-blocking; failure does not abort ingestion).
 
     On any failure: meeting.status is set to 'failed', exception is re-raised.
     This function never calls db.commit() — the caller owns the transaction boundary.

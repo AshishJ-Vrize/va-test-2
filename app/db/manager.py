@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from contextlib import asynccontextmanager
+from urllib.parse import quote_plus
 from dataclasses import dataclass
 from threading import Lock
 from typing import TYPE_CHECKING, AsyncGenerator
@@ -115,7 +115,7 @@ class DatabaseManager:
         db_name = _db_name(cached_tenant.org_name)
         # psycopg3 async driver — postgresql+psycopg_async://
         return (
-            f"postgresql+psycopg_async://{db_user}:{secret}"
+            f"postgresql+psycopg_async://{quote_plus(db_user)}:{quote_plus(secret)}"
             f"@{db_host}/{db_name}?sslmode=require"
         )
 

@@ -5,9 +5,16 @@ from dataclasses import dataclass
 
 from app.services.ingestion.vtt_parser import VttSegment
 
-# ── Constants (original — kept for backward compat) ───────────────────────────
+# ── Constants (original chunker — kept for backward compat) ───────────────────
 
+# Maximum words allowed in a single chunk.
+# text-embedding-3-small has an 8 191-token limit; 300 words ≈ 400 tokens,
+# leaving headroom for any tokenisation overhead.
 MAX_WORDS_PER_CHUNK = 300
+
+# Two consecutive turns from the same speaker are merged when the silence
+# gap between them is no longer than this value (in milliseconds).
+# 2 000 ms covers natural pauses without merging turns that are truly separate thoughts.
 MERGE_GAP_MS = 2_000
 
 # ── Constants (production chunker) ────────────────────────────────────────────
@@ -62,13 +69,18 @@ def merge_speaker_turns(segments: list[VttSegment]) -> list[VttSegment]:
 
     Rules
     -----
-    - Only merges when speaker matches AND gap ≤ MERGE_GAP_MS.
+    - Only merges when BOTH conditions hold:
+        1. The current segment's speaker == the previous segment's speaker.
+        2. The gap (current.start_ms - previous.end_ms) ≤ MERGE_GAP_MS.
+    - When merged, start_ms comes from the first segment, end_ms from the last.
     - Overlapping timestamps (negative gap) are treated as zero gap and merged.
-    - Returns a new list — input is not mutated.
+
+    Returns a new list — input is not mutated.
     """
     if not segments:
         return []
 
+    # Initialise with a copy of the first segment so the input is never mutated.
     merged: list[VttSegment] = [
         VttSegment(
             speaker=segments[0].speaker,
@@ -80,16 +92,18 @@ def merge_speaker_turns(segments: list[VttSegment]) -> list[VttSegment]:
 
     for seg in segments[1:]:
         prev = merged[-1]
-        gap_ms = seg.start_ms - prev.end_ms
+        gap_ms = seg.start_ms - prev.end_ms  # negative = overlapping timestamps
 
         if seg.speaker == prev.speaker and gap_ms <= MERGE_GAP_MS:
+            # Extend the previous segment to include this one.
             merged[-1] = VttSegment(
                 speaker=prev.speaker,
                 text=prev.text + " " + seg.text,
-                start_ms=prev.start_ms,
-                end_ms=seg.end_ms,
+                start_ms=prev.start_ms,  # keep original start
+                end_ms=seg.end_ms,       # extend end to this segment's end
             )
         else:
+            # Different speaker or gap too large — start a new segment.
             merged.append(
                 VttSegment(
                     speaker=seg.speaker,
@@ -112,16 +126,33 @@ def chunk_segments(segments: list[VttSegment]) -> list[Chunk]:
     Retained for backward compatibility and tests.  New code should use
     chunk_with_sentences() which is sentence-aware, overlap-enabled, and
     filters trivial chunks.
+
+    Splitting strategy
+    ------------------
+    - If a segment is ≤ MAX_WORDS_PER_CHUNK (300 words) it becomes a single chunk.
+    - If a segment exceeds 300 words it is split into multiple sub-chunks of ≤ 300
+      words each.  Timestamps for sub-chunks are distributed proportionally by word
+      position within the original segment's time range.
+
+    Guarantees
+    ----------
+    Every returned Chunk has all 5 fields populated:
+      - chunk_index : monotonically increasing from 0, no gaps
+      - text        : non-empty string
+      - speaker     : non-empty string
+      - start_ms    : integer ≥ 0
+      - end_ms      : always strictly > start_ms (guarded explicitly)
     """
     chunks: list[Chunk] = []
-    idx = 0
+    idx = 0  # global chunk counter across all segments
 
     for seg in segments:
         words = seg.text.split()
         if not words:
-            continue
+            continue  # Empty segment after merge — skip defensively.
 
         if len(words) <= MAX_WORDS_PER_CHUNK:
+            # Segment fits in one chunk — use it as-is.
             chunks.append(
                 Chunk(
                     chunk_index=idx,
@@ -132,7 +163,9 @@ def chunk_segments(segments: list[VttSegment]) -> list[Chunk]:
                 )
             )
             idx += 1
+
         else:
+            # Segment is too long — split and distribute timestamps proportionally.
             total_words = len(words)
             duration_ms = seg.end_ms - seg.start_ms
             start_word = 0
@@ -141,6 +174,8 @@ def chunk_segments(segments: list[VttSegment]) -> list[Chunk]:
                 end_word = min(start_word + MAX_WORDS_PER_CHUNK, total_words)
                 chunk_text = " ".join(words[start_word:end_word])
 
+                # Proportional timestamp: fraction of words elapsed maps to
+                # fraction of the segment's duration elapsed.
                 chunk_start_ms = seg.start_ms + int(
                     duration_ms * start_word / total_words
                 )
@@ -148,6 +183,8 @@ def chunk_segments(segments: list[VttSegment]) -> list[Chunk]:
                     duration_ms * end_word / total_words
                 )
 
+                # Safety guard: end must always be strictly after start.
+                # Can occur when duration_ms is 0 (malformed VTT timestamps).
                 if chunk_end_ms <= chunk_start_ms:
                     chunk_end_ms = chunk_start_ms + 1
 

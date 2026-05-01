@@ -129,6 +129,8 @@ async def ingest_meeting(
     # GET /users/{id} requires User.Read.All which is an app permission —
     # the delegated token from the frontend doesn't have it. We acquire an
     # app-only token via client credentials for these lookups only.
+    # All get_user_by_id calls fire in parallel. return_exceptions=True means
+    # one failed lookup does not cancel others — falls back to UPN.
     participants_raw = gm.get("participants", {})
     organizer_raw = participants_raw.get("organizer", {})
     organizer_graph_id: str = (
