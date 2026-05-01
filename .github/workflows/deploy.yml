@@ -34,6 +34,9 @@ jobs:
           docker build -t "$IMAGE_TAG" .
           docker push "$IMAGE_TAG"
 
+      - name: Debug — list container apps
+        run: az containerapp list --resource-group ${{ env.RESOURCE_GROUP }} --query "[].name" -o tsv
+
       - name: Configure ACR registry on Container App
         env:
           APP_NAME: ${{ env.CONTAINER_APP_NAME }}
