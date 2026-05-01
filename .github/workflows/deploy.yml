@@ -34,9 +34,6 @@ jobs:
           docker build -t "$IMAGE_TAG" .
           docker push "$IMAGE_TAG"
 
-      - name: Debug — list container apps
-        run: az containerapp list --resource-group ${{ env.RESOURCE_GROUP }} --query "[].name" -o tsv
-
       - name: Configure ACR registry on Container App
         env:
           APP_NAME: ${{ env.CONTAINER_APP_NAME }}
@@ -44,11 +41,19 @@ jobs:
           ACR_SERVER: ${{ env.ACR_NAME }}.azurecr.io
           ACR_USER: ${{ secrets.ACR_USERNAME }}
           ACR_PASS: ${{ secrets.ACR_PASSWORD }}
-        run: az containerapp registry set --name "$APP_NAME" --resource-group "$RG" --server "$ACR_SERVER" --username "$ACR_USER" --password "$ACR_PASS"
+        run: |
+          APP=$(echo "$APP_NAME" | tr -d '[:space:]')
+          RG=$(echo "$RG" | tr -d '[:space:]')
+          SERVER=$(echo "$ACR_SERVER" | tr -d '[:space:]')
+          az containerapp registry set --name "$APP" --resource-group "$RG" --server "$SERVER" --username "$ACR_USER" --password "$ACR_PASS"
 
       - name: Deploy to Container Apps
         env:
           IMAGE_TAG: ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}
           APP_NAME: ${{ env.CONTAINER_APP_NAME }}
           RG: ${{ env.RESOURCE_GROUP }}
-        run: az containerapp update --name "$APP_NAME" --resource-group "$RG" --image "$IMAGE_TAG"
+        run: |
+          APP=$(echo "$APP_NAME" | tr -d '[:space:]')
+          RG=$(echo "$RG" | tr -d '[:space:]')
+          IMG=$(echo "$IMAGE_TAG" | tr -d '[:space:]')
+          az containerapp update --name "$APP" --resource-group "$RG" --image "$IMG"
