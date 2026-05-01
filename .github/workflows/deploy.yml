@@ -34,6 +34,15 @@ jobs:
           docker build -t "$IMAGE_TAG" .
           docker push "$IMAGE_TAG"
 
+      - name: Configure ACR registry on Container App
+        env:
+          APP_NAME: ${{ env.CONTAINER_APP_NAME }}
+          RG: ${{ env.RESOURCE_GROUP }}
+          ACR_SERVER: ${{ env.ACR_NAME }}.azurecr.io
+          ACR_USER: ${{ secrets.ACR_USERNAME }}
+          ACR_PASS: ${{ secrets.ACR_PASSWORD }}
+        run: az containerapp registry set --name "$APP_NAME" --resource-group "$RG" --server "$ACR_SERVER" --username "$ACR_USER" --password "$ACR_PASS"
+
       - name: Deploy to Container Apps
         env:
           IMAGE_TAG: ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}
