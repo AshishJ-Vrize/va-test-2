@@ -6,38 +6,37 @@ on:
       - main
 
 env:
-  ACR_NAME: ${{ secrets.ACR_NAME }}                        # e.g. vaplatform
+  ACR_NAME: ${{ secrets.ACR_NAME }}
   IMAGE_NAME: va-backend
-  CONTAINER_APP_NAME: ${{ secrets.CONTAINER_APP_NAME }}    # e.g. va-backend-app
-  RESOURCE_GROUP: ${{ secrets.RESOURCE_GROUP }}            # e.g. va-rg
+  CONTAINER_APP_NAME: ${{ secrets.CONTAINER_APP_NAME }}
+  RESOURCE_GROUP: ${{ secrets.RESOURCE_GROUP }}
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Checkout code
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. Log in to Azure using service principal credentials
       - name: Azure Login
         uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      # 3. Log in to Azure Container Registry
       - name: Log in to ACR
         run: az acr login --name ${{ env.ACR_NAME }}
 
-      # 4. Build and push Docker image
       - name: Build and push image
+        env:
+          IMAGE_TAG: ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}
         run: |
-          IMAGE_TAG=${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}
-          docker build -t $IMAGE_TAG .
-          docker push $IMAGE_TAG
-          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+          docker build -t "$IMAGE_TAG" .
+          docker push "$IMAGE_TAG"
 
-      # 5. Deploy new image to Azure Container Apps
       - name: Deploy to Container Apps
-        run: az containerapp update --name ${{ env.CONTAINER_APP_NAME }} --resource-group ${{ env.RESOURCE_GROUP }} --image ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}
+        env:
+          IMAGE_TAG: ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          APP_NAME: ${{ env.CONTAINER_APP_NAME }}
+          RG: ${{ env.RESOURCE_GROUP }}
+        run: az containerapp update --name "$APP_NAME" --resource-group "$RG" --image "$IMAGE_TAG"
