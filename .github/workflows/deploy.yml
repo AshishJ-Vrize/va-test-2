@@ -40,4 +40,6 @@ jobs:
 
       # 5. Deploy new image to Azure Container Apps
       - name: Deploy to Container Apps
-        run: az containerapp update --name ${{ env.CONTAINER_APP_NAME }} --resource-group ${{ env.RESOURCE_GROUP }} --image ${{ env.IMAGE_TAG }}
+        run: |
+          IMAGE_TAG=${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          az containerapp update --name ${{ env.CONTAINER_APP_NAME }} --resource-group ${{ env.RESOURCE_GROUP }} --image $IMAGE_TAG
