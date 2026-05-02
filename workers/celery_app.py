@@ -14,6 +14,13 @@ celery_app = Celery(
     backend=settings.REDIS_URL,
 )
 
+# Redis Cluster mode requires all keys to hash to the same slot.
+# The {celery} hash tag ensures consistent slot assignment across broker + backend keys.
+celery_app.conf.update(
+    broker_transport_options={"global_keyprefix": "{celery}."},
+    result_backend_transport_options={"global_keyprefix": "{celery}."},
+)
+
 # Import task modules AFTER celery_app is fully defined.
 # Each module uses @celery_app.task — importing here registers them.
 # Must be at the bottom to avoid circular imports.
