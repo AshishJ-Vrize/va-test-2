@@ -116,7 +116,8 @@ from app.api.routes.webhook import router as webhook_router    # noqa: E402
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:3000",   # Next.js dev server
+        "http://localhost:3000",
+        "https://va-frontend-app.orangebay-5ee9011f.centralindia.azurecontainerapps.io",
     ],
     allow_credentials=True,
     allow_methods=["*"],
