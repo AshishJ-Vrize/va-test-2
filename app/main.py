@@ -15,6 +15,9 @@ from contextlib import asynccontextmanager
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
+import ssl
+from urllib.parse import parse_qs, urlparse, urlencode, urlunparse
+
 import redis.asyncio as aioredis
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -50,7 +53,17 @@ async def lifespan(app: FastAPI):
     tenant_registry = TenantRegistry()
     db_manager = DatabaseManager(kv_client)
 
-    redis_client = aioredis.Redis.from_url(settings.REDIS_URL, decode_responses=True)
+    # redis-py 6.x requires ssl_cert_reqs as a Python ssl constant, not as a URL param.
+    # Celery parses CERT_NONE from the URL itself, so we strip it here and pass directly.
+    _redis_url = settings.REDIS_URL
+    _ssl_kwargs: dict = {}
+    if "ssl_cert_reqs" in _redis_url:
+        _parsed = urlparse(_redis_url)
+        _params = parse_qs(_parsed.query)
+        _params.pop("ssl_cert_reqs", None)
+        _redis_url = urlunparse(_parsed._replace(query=urlencode({k: v[0] for k, v in _params.items()})))
+        _ssl_kwargs["ssl_cert_reqs"] = ssl.CERT_NONE
+    redis_client = aioredis.Redis.from_url(_redis_url, decode_responses=True, **_ssl_kwargs)
 
     jwks_cache = JWKSCache(redis_client)
     token_verifier = TokenVerifier(jwks_cache)
