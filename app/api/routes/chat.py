@@ -92,8 +92,8 @@ async def chat(
         current_user.id, body.meeting_id, body.session_id, db
     )
 
-    # 3. Route classification
-    classification = await classify_query(body.query)
+    # 3. Route classification (also resolves any speaker name to graph_ids)
+    classification = await classify_query(body.query, db)
     route = classification["route"]
     filters = classification["filters"]
     search_query = classification["search_query"]
