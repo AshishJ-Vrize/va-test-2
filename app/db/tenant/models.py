@@ -159,17 +159,41 @@ class Transcript(Base):
 
 class Chunk(Base):
     """
-    Text chunk for RAG retrieval. embedding column uses pgvector Vector(1536).
+    Multi-turn text chunk for hybrid RAG retrieval.
 
-    IMPORTANT: Do NOT add an HNSW index here. HNSW must be created with
-    CREATE INDEX CONCURRENTLY in a separate migration AFTER bulk data load,
-    otherwise the migration blocks ingestion and locks the table.
+    A chunk groups several consecutive utterances (5-15 turns, ~20-60s span)
+    so a single chunk can contain multiple speakers. Speaker attribution lives
+    inside `chunk_text` per turn; `speakers` and `speaker_graph_ids` are
+    indexed projections for fast filtering.
 
-    contextual_text: the enriched string that was actually embedded (speaker +
-    meeting context prepended). Raw text is preserved in `text` for display.
-    embedding_version: bump when the embedding model changes so old rows can be
-    identified and backfilled via scripts/backfill_embeddings.py.
-    text_tsv: generated tsvector for BM25 hybrid retrieval — do not write to it.
+    Columns
+    -------
+    meeting_id        : Denormalised FK to meetings(id). Used for meeting-scoped
+                        and cross-meeting filtering directly, avoiding the
+                        chunks→transcripts→meetings join at query time.
+    transcript_id     : FK to transcripts(id). Retained for re-ingestion
+                        cleanup (DELETE WHERE transcript_id = X).
+    chunk_index       : Zero-based ordinal within the meeting.
+    start_ms / end_ms : Chunk time-span in milliseconds. Seconds derived at
+                        JSON-write time for chunk_text[].st / .et.
+    speakers          : Deduped first-name array per chunk, e.g. ['Ashish','Rahul'].
+                        GIN-indexed; speaker filters use `speakers && ARRAY[:name]`.
+    speaker_graph_ids : Microsoft Graph IDs aligned by index with `speakers`.
+                        NULL slot when name didn't resolve to a participant.
+                        Used for cross-meeting per-person identity.
+    chunk_text        : JSONB array of utterance objects:
+                        [{n: full_name, sn: short_name, t: text, st: sec, et: sec}, ...]
+    chunk_context     : Optional short topic string (currently unused; populated
+                        later by contextualizer).
+    search_text       : Lowercased flat string concatenating speakers + utterance
+                        tokens, punctuation stripped. Source of search_vector.
+    search_vector     : Generated tsvector — DO NOT write to it. Source of BM25.
+    embedding         : pgvector(1536). Initially NULL after chunk insert; the
+                        pipeline updates it after embedding the per-chunk
+                        conversational input. HNSW index created in migration
+                        20260428_0002, retained as-is.
+    embedding_version : Bump when embedding recipe changes; pipeline writes
+                        the current value (currently 2 for the v2 schema).
     """
 
     __tablename__ = "chunks"
@@ -180,6 +204,12 @@ class Chunk(Base):
         default=uuid.uuid4,
         server_default=text("gen_random_uuid()"),
     )
+    meeting_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("meetings.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
     transcript_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("transcripts.id", ondelete="CASCADE"),
@@ -187,19 +217,27 @@ class Chunk(Base):
         index=True,
     )
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
-    text: Mapped[str] = mapped_column(Text, nullable=False)
-    speaker: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     start_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     end_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    embedding: Mapped[Optional[list[float]]] = mapped_column(Vector(1536), nullable=True)
-    contextual_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    embedding_version: Mapped[int] = mapped_column(
-        SmallInteger, nullable=False, default=1, server_default="1"
+    speakers: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default="{}"
     )
-    text_tsv: Mapped[Optional[str]] = mapped_column(
+    speaker_graph_ids: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default="{}"
+    )
+    chunk_text: Mapped[list[dict]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    chunk_context: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    search_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    search_vector: Mapped[Optional[str]] = mapped_column(
         TSVECTOR,
-        Computed("to_tsvector('english', text)", persisted=True),
+        Computed("to_tsvector('english', coalesce(search_text, ''))", persisted=True),
         nullable=True,
+    )
+    embedding: Mapped[Optional[list[float]]] = mapped_column(Vector(1536), nullable=True)
+    embedding_version: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, default=2, server_default="2"
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
