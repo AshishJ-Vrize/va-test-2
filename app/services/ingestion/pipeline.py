@@ -1,3 +1,25 @@
+"""V2 ingestion pipeline — multi-turn chunks with hybrid-search columns.
+
+Stages
+------
+ 1. status='ingesting'                                 → meetings
+ 2. parse VTT
+ 3. compute transcript stats
+ 4. upsert transcript                                  → transcripts
+ 5. resolve VTT speakers against meeting_participants
+ 6. merge same-speaker turns + multi-turn chunking     (in memory)
+ 7. build search_text + embedding_input per chunk
+ 8. embed all inputs (batched Azure call)
+ 9. persist chunks (DELETE then INSERT)                → chunks
+10. speaker_analytics with user_id resolved via graph_id → speaker_analytics
+11. credit_usage                                       → credit_usage  (append-only)
+12. meeting summary (built from raw segments)          → meeting_summaries  (non-fatal)
+13. status='ready'                                     → meetings
+14. insights generation                                → meeting_insights   (non-fatal)
+
+On failure in 1-11 or 13 — meetings.status='failed' and re-raise.
+This function never calls db.commit() — the caller owns the transaction.
+"""
 from __future__ import annotations
 
 import json
@@ -15,17 +37,26 @@ from app.db.tenant.models import (
     MeetingSummary,
     SpeakerAnalytic,
     Transcript,
+    User,
 )
-from app.services.ingestion.chunker import chunk_with_sentences, merge_speaker_turns
-from app.services.ingestion.contextualizer import contextualize_chunks
+from app.services.ingestion.chunker import chunk_segments, merge_speaker_turns
+from app.services.ingestion.contextualizer import (
+    build_embedding_input,
+    build_search_text,
+)
 from app.services.ingestion.embedder import embed_batch, embed_single
+from app.services.ingestion.speaker_resolver import (
+    ResolvedSpeaker,
+    build_speaker_resolution,
+)
 from app.services.ingestion.vtt_parser import VttSegment, parse_vtt
 
 log = logging.getLogger(__name__)
 
-# Increment this when the embedding model or contextualisation strategy changes.
-# Old rows retain their version; scripts/backfill_embeddings.py migrates them lazily.
-EMBEDDING_VERSION = 1
+# Bumped from 1 → 2 for the multi-turn chunk schema. Bump again whenever the
+# embedding-input recipe or the chunking strategy changes; old chunks then
+# become identifiable via WHERE embedding_version < :current.
+EMBEDDING_VERSION = 2
 
 
 async def run_ingestion_pipeline(
@@ -34,62 +65,37 @@ async def run_ingestion_pipeline(
     db: AsyncSession,
     credits_per_minute: int,
 ) -> None:
-    """
-    Orchestrate the full ingestion pipeline for a single meeting.
+    """Orchestrate the v2 ingestion pipeline for a single meeting.
 
-    This is the only public entry point for the ingestion service.
-    Called by the ingest route handler and by Celery tasks in workers/tasks/ingestion.py.
-
-    Pipeline steps (in order)
-    --------------------------
-    1.  Set meeting.status = 'ingesting'
-    2.  Parse the raw VTT string into ordered speaker segments.
-    3.  Compute word count and language for the transcript record.
-    4.  Upsert the transcripts row (supports re-ingestion of the same meeting).
-    5.  Merge consecutive same-speaker turns, then split into sentence-aware
-        chunks (≤ 250 words target, 40-word overlap, ≥ 20-word minimum).
-    6.  Generate contextual embedding text for every chunk (one LLM call, batched).
-        Falls back to free-layer context (meeting metadata + speaker label) if the
-        LLM call fails — ingestion never blocks on contextualisation errors.
-    7.  Embed all contextual texts via Azure OpenAI in batched API calls.
-    8.  Delete old chunks (if any) and persist new ones with embeddings,
-        contextual_text, and embedding_version.
-    9.  Compute per-speaker talk time and word count → persist speaker_analytics.
-    10. Record credit consumption in the append-only credit_usage ledger.
-    11. Generate a meeting-level summary and embed it → upsert meeting_summaries.
-        Used for cross-meeting RAG search.
-    12. Set meeting.status = 'ready'.
-    13. Generate meeting insights (non-blocking; failure does not abort ingestion).
-
-    On any failure: meeting.status is set to 'failed', exception is re-raised.
-    This function never calls db.commit() — the caller owns the transaction boundary.
+    Public entry point for the ingestion service. Called by the ingest route
+    handler and by Celery tasks in workers/tasks/ingestion.py. The caller
+    owns the transaction boundary — this function only flushes.
     """
     meeting = await db.get(Meeting, meeting_id)
     if meeting is None:
         raise ValueError(f"Meeting {meeting_id} not found in tenant DB")
 
-    # ── Step 1: Mark ingestion in progress ──────────────────────────────────
+    # ── Step 1: mark in progress ──────────────────────────────────────────────
     meeting.status = "ingesting"
     await db.flush()
     log.info("Ingestion started for meeting %s", meeting_id)
 
     try:
-        # ── Step 2: Parse VTT ────────────────────────────────────────────────
+        # ── Step 2: parse VTT ──────────────────────────────────────────────
         segments: list[VttSegment] = parse_vtt(vtt_content)
         if not segments:
             raise ValueError("VTT produced zero segments — transcript may be empty")
 
-        # ── Step 3: Compute transcript stats ─────────────────────────────────
+        # ── Step 3: transcript stats ───────────────────────────────────────
         full_text = " ".join(s.text for s in segments)
         word_count = len(full_text.split())
         language = "en"
 
-        # ── Step 4: Upsert transcript row ────────────────────────────────────
+        # ── Step 4: upsert transcript ──────────────────────────────────────
         result = await db.execute(
             select(Transcript).where(Transcript.meeting_id == meeting_id)
         )
         transcript = result.scalar_one_or_none()
-
         if transcript is None:
             transcript = Transcript(
                 meeting_id=meeting_id,
@@ -102,75 +108,61 @@ async def run_ingestion_pipeline(
             transcript.raw_text = vtt_content
             transcript.language = language
             transcript.word_count = word_count
-
         await db.flush()
 
-        # ── Step 5: Merge turns and chunk (sentence-aware + overlap) ─────────
+        # ── Step 5: resolve VTT speakers to graph IDs ──────────────────────
+        unique_vtt_speakers = list({s.speaker for s in segments})
+        resolution = await build_speaker_resolution(
+            meeting_id=meeting_id,
+            vtt_speakers=unique_vtt_speakers,
+            db=db,
+        )
+
+        # ── Step 6: merge same-speaker turns + multi-turn chunking ─────────
         merged = merge_speaker_turns(segments)
-        chunks = chunk_with_sentences(merged)
+        chunks = chunk_segments(merged, resolution)
         if not chunks:
             raise ValueError("Chunker produced zero chunks")
 
-        # Ordered unique speakers — used for contextual embedding header.
-        seen: set[str] = set()
-        speakers: list[str] = []
-        for c in chunks:
-            if c.speaker not in seen:
-                seen.add(c.speaker)
-                speakers.append(c.speaker)
+        # ── Step 7: derive search_text and embedding_input per chunk ───────
+        # chunk_context is currently always None — kept as parameter so the
+        # contextualizer can be wired in later without changing this loop.
+        search_texts = [build_search_text(c.chunk_text, None) for c in chunks]
+        embed_inputs = [build_embedding_input(c.chunk_text, None) for c in chunks]
 
-        meeting_subject = meeting.meeting_subject or ""
-        meeting_date = (
-            meeting.meeting_date.strftime("%Y-%m-%d")
-            if meeting.meeting_date
-            else ""
-        )
-
-        # ── Step 6: Generate contextual embedding texts ───────────────────────
-        contextual_texts = await contextualize_chunks(
-            meeting_subject=meeting_subject,
-            meeting_date=meeting_date,
-            speakers=speakers,
-            chunks=chunks,
-        )
-        if len(contextual_texts) != len(chunks):
-            raise ValueError(
-                f"Contextualiser returned {len(contextual_texts)} texts "
-                f"for {len(chunks)} chunks"
-            )
-
-        # ── Step 7: Embed contextual texts ────────────────────────────────────
-        embeddings = await embed_batch(contextual_texts)
+        # ── Step 8: embed all inputs in batch ──────────────────────────────
+        embeddings = await embed_batch(embed_inputs)
         if len(embeddings) != len(chunks):
             raise ValueError(
                 f"Embedding count mismatch: {len(embeddings)} embeddings "
                 f"for {len(chunks)} chunks"
             )
 
-        # ── Step 8: Persist chunks ────────────────────────────────────────────
+        # ── Step 9: persist chunks (DELETE then INSERT — idempotent) ───────
         await db.execute(
             delete(ChunkRow).where(ChunkRow.transcript_id == transcript.id)
         )
         await db.flush()
 
-        for chunk, ctx_text, embedding in zip(chunks, contextual_texts, embeddings):
-            db.add(
-                ChunkRow(
-                    transcript_id=transcript.id,
-                    chunk_index=chunk.chunk_index,
-                    text=chunk.text,
-                    speaker=chunk.speaker,
-                    start_ms=chunk.start_ms,
-                    end_ms=chunk.end_ms,
-                    contextual_text=ctx_text,
-                    embedding=embedding,
-                    embedding_version=EMBEDDING_VERSION,
-                )
-            )
+        for c, search_text, embedding in zip(chunks, search_texts, embeddings):
+            db.add(ChunkRow(
+                meeting_id=meeting_id,
+                transcript_id=transcript.id,
+                chunk_index=c.chunk_index,
+                start_ms=c.start_ms,
+                end_ms=c.end_ms,
+                speakers=c.speakers,
+                speaker_graph_ids=c.speaker_graph_ids,
+                chunk_text=c.chunk_text,
+                chunk_context=None,
+                search_text=search_text,
+                embedding=embedding,
+                embedding_version=EMBEDDING_VERSION,
+            ))
         await db.flush()
         log.info("Persisted %d chunks for meeting %s", len(chunks), meeting_id)
 
-        # ── Step 9: Speaker analytics ─────────────────────────────────────────
+        # ── Step 10: speaker analytics (with user_id via graph_id) ─────────
         speaker_stats: dict[str, dict[str, int]] = {}
         for seg in segments:
             entry = speaker_stats.setdefault(
@@ -179,68 +171,66 @@ async def run_ingestion_pipeline(
             entry["talk_ms"] += max(0, seg.end_ms - seg.start_ms)
             entry["word_count"] += len(seg.text.split())
 
+        gid_to_user_id = await _build_gid_to_user_id_map(resolution, db)
+
         await db.execute(
             delete(SpeakerAnalytic).where(SpeakerAnalytic.meeting_id == meeting_id)
         )
         await db.flush()
 
-        for speaker_label, stats in speaker_stats.items():
-            db.add(
-                SpeakerAnalytic(
-                    meeting_id=meeting_id,
-                    user_id=None,
-                    speaker_label=speaker_label,
-                    talk_time_seconds=max(1, stats["talk_ms"] // 1000),
-                    word_count=stats["word_count"],
-                )
-            )
+        for vtt_label, stats in speaker_stats.items():
+            rs = resolution.get(vtt_label)
+            user_id = gid_to_user_id.get(rs.graph_id) if rs and rs.graph_id else None
+            db.add(SpeakerAnalytic(
+                meeting_id=meeting_id,
+                user_id=user_id,
+                speaker_label=rs.n if rs else vtt_label,
+                talk_time_seconds=max(1, stats["talk_ms"] // 1000),
+                word_count=stats["word_count"],
+            ))
         await db.flush()
 
-        # ── Step 10: Credit usage ──────────────────────────────────────────────
+        # ── Step 11: credit usage (append-only) ────────────────────────────
         duration_minutes = meeting.duration_minutes or 1
         credits_consumed = max(1, duration_minutes * credits_per_minute)
-        db.add(
-            CreditUsage(
-                meeting_id=meeting_id,
-                credits_consumed=credits_consumed,
-                operation="ingestion",
-            )
-        )
+        db.add(CreditUsage(
+            meeting_id=meeting_id,
+            credits_consumed=credits_consumed,
+            operation="ingestion",
+        ))
         await db.flush()
 
-        # ── Step 11: Meeting summary for cross-meeting RAG ────────────────────
+        # ── Step 12: meeting summary (built from raw segments — non-fatal) ─
         try:
             await _upsert_meeting_summary(
                 meeting_id=meeting_id,
-                meeting_subject=meeting_subject,
-                chunks=chunks,
+                meeting_subject=meeting.meeting_subject or "",
+                segments=segments,
+                resolution=resolution,
                 db=db,
             )
         except Exception:
-            # Non-fatal: summary failure must not block ingestion completion.
             log.warning(
-                "Meeting summary generation failed for %s — skipping",
+                "Meeting summary failed for %s — skipping",
                 meeting_id,
                 exc_info=True,
             )
 
-        # ── Step 12: Mark ready ───────────────────────────────────────────────
+        # ── Step 13: mark ready ────────────────────────────────────────────
         meeting.status = "ready"
         await db.flush()
         log.info(
-            "Ingestion complete for meeting %s — %d chunks, %d credits consumed",
-            meeting_id,
-            len(chunks),
-            credits_consumed,
+            "Ingestion complete for meeting %s — %d chunks, %d credits",
+            meeting_id, len(chunks), credits_consumed,
         )
 
-        # ── Step 13: Generate meeting insights (non-blocking) ────────────────
+        # ── Step 14: insights (non-fatal) ──────────────────────────────────
         try:
             from app.services.insights.generator import generate_insights_for_meeting
             await generate_insights_for_meeting(db=db, meeting_id=meeting_id)
         except Exception:
             log.warning(
-                "Meeting insight generation failed for %s — skipping",
+                "Insight generation failed for %s — skipping",
                 meeting_id,
                 exc_info=True,
             )
@@ -250,6 +240,27 @@ async def run_ingestion_pipeline(
         await db.flush()
         log.exception("Ingestion failed for meeting %s", meeting_id)
         raise
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+async def _build_gid_to_user_id_map(
+    resolution: dict[str, ResolvedSpeaker],
+    db: AsyncSession,
+) -> dict[str, uuid.UUID]:
+    """Look up user.id for every resolved graph_id in this meeting's speakers.
+
+    Returns {} when no speakers resolved. SpeakerAnalytic.user_id stays NULL
+    for unresolved or external speakers.
+    """
+    resolved_gids = {rs.graph_id for rs in resolution.values() if rs.graph_id}
+    if not resolved_gids:
+        return {}
+
+    rows = await db.execute(
+        select(User.id, User.graph_id).where(User.graph_id.in_(resolved_gids))
+    )
+    return {row.graph_id: row.id for row in rows}
 
 
 # ── Meeting summary ───────────────────────────────────────────────────────────
@@ -292,24 +303,31 @@ Return JSON: {"topics": ["topic 1", "topic 2", ...]}"""
 async def _upsert_meeting_summary(
     meeting_id: uuid.UUID,
     meeting_subject: str,
-    chunks,
+    segments: list[VttSegment],
+    resolution: dict[str, ResolvedSpeaker],
     db: AsyncSession,
 ) -> None:
-    """
-    Generate a meeting-level summary, embed it, and upsert into meeting_summaries.
-    Used to power cross-meeting RAG search and meta queries.
+    """Generate MOM summary, embed it, upsert into meeting_summaries.
+
+    Built from raw VTT segments (not chunks) so the summary is independent
+    of chunking strategy. Speaker labels in the prompt use resolved full
+    names when available.
     """
     from app.services.ingestion.contextualizer import _get_client, _llm_deployment
 
     client = _get_client()
     deployment = _llm_deployment()
 
-    # Build a condensed transcript (up to 4000 words) for the summary prompt.
-    transcript_text = "\n".join(
-        f"{c.speaker}: {c.text}" for c in chunks
-    )[:16000]
+    # Render each segment as `<full_name>: <text>`. Truncate at 16 000 chars
+    # (~4 000 words) — enough context for a useful summary, well below the
+    # context window.
+    lines: list[str] = []
+    for seg in segments:
+        rs = resolution.get(seg.speaker)
+        name = rs.n if rs else (seg.speaker or "Unknown")
+        lines.append(f"{name}: {seg.text}")
+    transcript_text = "\n".join(lines)[:16000]
 
-    # Generate summary.
     summary_resp = await client.chat.completions.create(
         model=deployment,
         messages=[
@@ -323,7 +341,6 @@ async def _upsert_meeting_summary(
     if not summary_text:
         return
 
-    # Extract topics.
     topic_resp = await client.chat.completions.create(
         model=deployment,
         response_format={"type": "json_object"},
@@ -337,16 +354,14 @@ async def _upsert_meeting_summary(
     raw_topics = json.loads(topic_resp.choices[0].message.content or "{}")
     topics: list[str] = raw_topics.get("topics", [])
 
-    # Embed summary.
     summary_embedding = await embed_single(summary_text)
 
-    # Upsert — if a summary already exists (re-ingestion), replace it.
     stmt = pg_insert(MeetingSummary).values(
         meeting_id=meeting_id,
         summary_text=summary_text,
         embedding=summary_embedding,
         topics=topics,
-        generated_by=f"{_llm_deployment()}@v{EMBEDDING_VERSION}",
+        generated_by=f"{deployment}@v{EMBEDDING_VERSION}",
     )
     stmt = stmt.on_conflict_do_update(
         index_elements=["meeting_id"],
