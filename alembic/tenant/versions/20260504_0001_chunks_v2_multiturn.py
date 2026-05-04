@@ -37,7 +37,11 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision = "20260504_0001"
-down_revision = "20260428_0003"
+# Merge migration — chains "fix_participant_schema" (the participant graph_id
+# rewrite) and the "20260428_000x" RAG-prep series into one head before this
+# v2 schema reshape lands. Without this tuple, alembic refuses to upgrade
+# because there are two parallel root chains in the tenant repo.
+down_revision = ("20260428_0003", "fix_participant_schema")
 branch_labels = None
 depends_on = None
 

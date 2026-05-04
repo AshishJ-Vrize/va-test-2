@@ -11,6 +11,14 @@ import asyncio
 import logging
 import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
+
+# Load .env into os.environ before anything else imports — Azure SDK's
+# EnvironmentCredential reads os.environ directly, and pydantic-settings
+# only populates the Settings object (not os.environ), so a stale/placeholder
+# AZURE_TENANT_ID in the shell would otherwise win and fail credential init.
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=True)
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
