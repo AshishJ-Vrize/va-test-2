@@ -130,5 +130,9 @@ async def _create_with_backoff(client, deployment: str, user_message: str):
             {"role": "user", "content": user_message},
         ],
         temperature=0,
-        max_tokens=800,
+        # Comprehensive extraction needs room — multi-paragraph summary plus
+        # action items + decisions + follow-ups for a busy meeting can easily
+        # cross 1k tokens. 2500 is the upper bound; LLM emits less when the
+        # transcript is thin.
+        max_tokens=2500,
     )

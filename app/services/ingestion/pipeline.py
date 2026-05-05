@@ -266,34 +266,56 @@ async def _build_gid_to_user_id_map(
 # ── Meeting summary ───────────────────────────────────────────────────────────
 
 _SUMMARY_SYSTEM_PROMPT = """\
-You are generating Minutes of Meeting (MOM) from a business meeting transcript.
+You are generating COMPREHENSIVE Minutes of Meeting (MOM) from a business
+meeting transcript. Capture every important point — anything a participant
+who missed the meeting would need to know belongs here. Brevity is NOT a
+goal; completeness and accuracy are.
+
 Return plain text in exactly this structure — no JSON, no markdown fences:
 
 MEETING SUMMARY
-<2-3 sentence overview of what was discussed and decided>
+<4-8 sentence narrative covering every topic discussed, in roughly the
+order they came up. Name the speakers who made substantive contributions
+and what they specifically said or proposed. Include all concrete details:
+numbers, dates, deadlines, customer names, project names, monetary figures,
+percentages, tools mentioned. Capture disagreements and how they were
+resolved. Do not editorialise; state what happened.>
 
 ATTENDEES
-<comma-separated list of speakers who spoke>
+<comma-separated list of every speaker who actually spoke in the meeting,
+using their full names exactly as they appear in the transcript>
 
 AGENDA / TOPICS DISCUSSED
-- <topic 1>
-- <topic 2>
+- <topic 1 — one or two sentences with the substance, not just a label>
+- <topic 2 — one or two sentences with the substance, not just a label>
 - <topic 3 ...>
+(List EVERY distinct topic. Err on the side of more bullets, not fewer.)
 
 KEY DECISIONS
-- <decision>: <one-line rationale>
+- <decision>: <one-or-two-sentence rationale, including any alternatives
+  rejected if mentioned>
+(Capture EVERY firm decision, including small process decisions like
+"standups will move to 9am". If genuinely none, write "None noted.")
 
 ACTION ITEMS
-- [Owner] Task — Due: <date or TBD>
+- [Owner full name] Task — Due: <date or TBD>
+  Context: <one sentence explaining why this task matters>
+(Capture every actionable task, both explicit and clearly implied. If the
+speaker said "I'll do X", trace back to their full name. If genuinely
+unassigned, use [Unassigned]. If genuinely none, write "None noted.")
 
 NEXT STEPS / FOLLOW-UPS
-- <open question or deferred topic>
+- <open question, deferred topic, or unresolved item — be specific>
+(If genuinely none, write "None noted.")
 
 Rules:
 - Use only information present in the transcript — never invent.
-- Keep each bullet concise (one line).
-- If a section has nothing, write "None noted."
-- Include specific names, figures, dates, and product names when mentioned."""
+- Use full names for attendees and action item owners — exactly as they
+  appear in the transcript.
+- Include specific names, figures, dates, and product names whenever they
+  are mentioned. Do not generalise specifics away.
+- Never paraphrase a speaker's claim into something stronger than what
+  they actually said."""
 
 _TOPIC_SYSTEM_PROMPT = """\
 Extract 3-5 short topic labels (2-4 words each) from this meeting summary.
@@ -335,7 +357,9 @@ async def _upsert_meeting_summary(
             {"role": "user", "content": f"Meeting: {meeting_subject}\n\n{transcript_text}"},
         ],
         temperature=0,
-        max_tokens=400,
+        # Comprehensive MOM with every section populated needs ~1500 tokens
+        # for a busy meeting; LLM produces less for a short meeting.
+        max_tokens=1800,
     )
     summary_text = (summary_resp.choices[0].message.content or "").strip()
     if not summary_text:

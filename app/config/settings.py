@@ -35,6 +35,14 @@ class Settings(BaseSettings):
     AZURE_OPENAI_DEPLOYMENT_LLM: str        # e.g. gpt-4o
     AZURE_OPENAI_DEPLOYMENT_LLM_MINI: str = ""  # e.g. gpt-4o-mini; falls back to LLM if empty
 
+    # ── Optional per-task LLM deployment overrides ─────────────────────────
+    # Each falls back to the appropriate base above. Set to A/B-test a model
+    # on one task without touching code. See app/services/llm/deployments.py.
+    AZURE_OPENAI_DEPLOYMENT_LLM_ROUTER: str = ""    # default: LLM_MINI || LLM
+    AZURE_OPENAI_DEPLOYMENT_LLM_ANSWER: str = ""    # default: LLM
+    AZURE_OPENAI_DEPLOYMENT_LLM_INSIGHTS: str = ""  # default: LLM
+    AZURE_OPENAI_DEPLOYMENT_LLM_SUMMARY: str = ""   # default: LLM
+
     # ── Azure Text Analytics ───────────────────────────────────────────────
     # Used by sentiment team — not Sprint 1. Optional until integrated.
     AZURE_TEXT_ANALYTICS_ENDPOINT: str = ""

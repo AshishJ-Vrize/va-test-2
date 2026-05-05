@@ -532,62 +532,7 @@ class FeaturePermission(Base):
     )
 
 
-class ChatSession(Base):
-    __tablename__ = "chat_sessions"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        default=uuid.uuid4,
-        server_default=text("gen_random_uuid()"),
-    )
-    meeting_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("meetings.id", ondelete="CASCADE"),
-        nullable=True,
-        index=True,
-    )
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("users.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.now(),
-        onupdate=func.now(),
-    )
-
-
-class ChatMessage(Base):
-    __tablename__ = "chat_messages"
-    __table_args__ = (
-        CheckConstraint(
-            "role IN ('user','assistant')",
-            name="ck_chat_messages_role",
-        ),
-    )
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        default=uuid.uuid4,
-        server_default=text("gen_random_uuid()"),
-    )
-    session_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("chat_sessions.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    role: Mapped[str] = mapped_column(String(20), nullable=False)
-    content: Mapped[str] = mapped_column(Text, nullable=False)
-    citations: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+# NOTE: ChatSession + ChatMessage models were removed when the RAG/chat layer
+# was deleted. The corresponding chat_sessions / chat_messages tables may still
+# exist in databases that were bootstrapped before this change — they are now
+# orphaned (no code references them) and can be dropped manually if desired.
